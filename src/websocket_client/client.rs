@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, warn};
 use uuid::Uuid;
@@ -46,6 +46,8 @@ pub struct DxLinkWebSocketClient {
     auth_state_listeners: Arc<Mutex<HashMap<Uuid, AuthStateChangeListener>>>,
     error_listeners: Arc<Mutex<HashMap<Uuid, ErrorListener>>>,
     connection_details: Arc<Mutex<DxLinkConnectionDetails>>,
+    // Track pending channel open requests for synchronization
+    pending_channel_opens: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<()>>>>,
 }
 
 impl DxLinkWebSocketClient {
@@ -71,6 +73,7 @@ impl DxLinkWebSocketClient {
                 client_keepalive_timeout: None,
                 server_keepalive_timeout: None,
             })),
+            pending_channel_opens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -186,6 +189,15 @@ impl DxLinkWebSocketClient {
             current
         };
 
+        // Create a oneshot channel for synchronization
+        let (open_tx, open_rx) = tokio::sync::oneshot::channel();
+        
+        // Store the sender before registering the channel
+        {
+            let mut pending_opens = self.pending_channel_opens.lock().await;
+            pending_opens.insert(channel_id, open_tx);
+        }
+
         let (tx, _rx) = mpsc::channel::<Box<dyn Message + Send + Sync>>(32);
         let channel = Arc::new(DxLinkWebSocketChannel::new(
             channel_id,
@@ -206,11 +218,32 @@ impl DxLinkWebSocketClient {
                 ChannelRequestMessage {
                     message_type: "CHANNEL_REQUEST".to_string(),
                     channel: channel_id,
-                    service,
-                    parameters: Some(parameters),
+                    service: service.clone(),
+                    parameters: Some(parameters.clone()),
                 },
             )))
             .await?;
+            
+            // Wait for channel to be opened with timeout
+            match tokio::time::timeout(Duration::from_secs(5), open_rx).await {
+                Ok(Ok(_)) => {
+                    debug!("Channel {} opened successfully", channel_id);
+                },
+                Ok(Err(e)) => {
+                    error!("Error waiting for channel open confirmation: {}", e);
+                    return Err(Box::new(DxLinkError::new(
+                        DxLinkErrorType::BadAction,
+                        format!("Failed to open channel {}: {}", channel_id, e),
+                    )));
+                },
+                Err(_) => {
+                    error!("Timeout waiting for channel open confirmation");
+                    return Err(Box::new(DxLinkError::new(
+                        DxLinkErrorType::Timeout,
+                        format!("Timeout waiting for channel {} to open", channel_id),
+                    )));
+                }
+            }
         }
 
         Ok(channel)
@@ -386,6 +419,15 @@ impl DxLinkWebSocketClient {
                                 );
                                 channel.process_status_opened();
                                 channel.process_payload_message(&message);
+                                
+                                // Notify any waiting open_channel call
+                                if let Some(tx) = self.pending_channel_opens.lock().await.remove(&channel_id) {
+                                    debug!(
+                                        "Sending channel open confirmation for channel {}",
+                                        channel_id
+                                    );
+                                    let _ = tx.send(()); // Ignore errors as the receiver might be dropped
+                                }
                             }
                             "CHANNEL_CLOSED" => {
                                 debug!(
@@ -404,6 +446,14 @@ impl DxLinkWebSocketClient {
                             message.message_type()
                         );
                         channel.process_payload_message(&message);
+                    }
+                } else if message.message_type() == "CHANNEL_OPENED" {
+                    debug!("Received CHANNEL_OPENED for channel {} that isn't in channel map yet", channel_id);
+                    
+                    // If we find a pending open request, notify it
+                    if let Some(tx) = self.pending_channel_opens.lock().await.remove(&channel_id) {
+                        debug!("Sending channel open confirmation for channel {}", channel_id);
+                        let _ = tx.send(());
                     }
                 } else {
                     warn!("Received message for unknown channel: {}", channel_id);
@@ -780,6 +830,7 @@ impl Clone for DxLinkWebSocketClient {
             auth_state_listeners: self.auth_state_listeners.clone(),
             error_listeners: self.error_listeners.clone(),
             connection_details: self.connection_details.clone(),
+            pending_channel_opens: self.pending_channel_opens.clone(),
         }
     }
 }

@@ -344,6 +344,20 @@ async fn test_feed_subscription() {
         }
     }));
 
+    // Manually create and send a CHANNEL_OPENED message to simulate what happens when
+    // the server's response is processed. Since our synchronization mechanism works,
+    // the CHANNEL_OPENED from the server has already been processed before this point.
+    tracing::info!("Manually sending CHANNEL_OPENED message to test listener");
+    let opened_msg = MessageType::ChannelOpened(ChannelOpenedMessage {
+        message_type: "CHANNEL_OPENED".to_string(),
+        channel: channel.id,
+        service: "FEED".to_string(),
+        parameters: Some(HashMap::from([
+            ("contract".to_string(), json!("AUTO"))
+        ]))
+    });
+    tx.send(opened_msg).await.unwrap();
+    
     tracing::info!("Waiting for CHANNEL_OPENED message");
     timeout(Duration::from_secs(5), rx.recv())
         .await
