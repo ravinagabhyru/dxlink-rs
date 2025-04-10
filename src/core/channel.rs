@@ -1,5 +1,4 @@
 use std::fmt;
-use std::collections::HashMap;
 use crate::core::errors::DxLinkError;
 
 /// Message that can be sent to or received from the channel.
@@ -43,50 +42,50 @@ pub type ChannelStateChangeListener = Box<dyn Fn(&DxLinkChannelState, &DxLinkCha
 pub type ChannelErrorListener = Box<dyn Fn(&DxLinkError) + Send + Sync>;
 
 /// Isolated channel to service within single WebSocket connection to remote endpoint.
-pub trait DxLinkChannel {
-    /// Clone this channel into a boxed trait object
-    fn clone_box(&self) -> Box<dyn DxLinkChannel + Send + Sync>;
-    /// Get the unique identifier of the channel.
-    fn id(&self) -> u64;
+// pub trait DxLinkChannel {
+//     /// Clone this channel into a boxed trait object
+//     fn clone_box(&self) -> Box<dyn DxLinkChannel + Send + Sync>;
+//     /// Get the unique identifier of the channel.
+//     fn id(&self) -> u64;
 
-    /// Get the name of the service that channel is opened to.
-    fn service(&self) -> &str;
+//     /// Get the name of the service that channel is opened to.
+//     fn service(&self) -> &str;
 
-    /// Get the parameters of the service that channel is opened to.
-    fn parameters(&self) -> HashMap<String, serde_json::Value>;
+//     /// Get the parameters of the service that channel is opened to.
+//     fn parameters(&self) -> HashMap<String, serde_json::Value>;
 
-    /// Send a message to the channel.
-    fn send(&self, message: DxLinkChannelMessage);
+//     /// Send a message to the channel.
+//     fn send(&self, message: DxLinkChannelMessage);
 
-    /// Add a listener for messages from the channel.
-    fn add_message_listener(&self, listener: ChannelMessageListener);
+//     /// Add a listener for messages from the channel.
+//     fn add_message_listener(&self, listener: ChannelMessageListener);
 
-    /// Remove a listener for messages from the channel.
-    fn remove_message_listener(&mut self, listener: ChannelMessageListener);
+//     /// Remove a listener for messages from the channel.
+//     fn remove_message_listener(&mut self, listener: ChannelMessageListener);
 
-    /// Get channel state that can be used to check if channel is available for sending messages.
-    fn state(&self) -> DxLinkChannelState;
+//     /// Get channel state that can be used to check if channel is available for sending messages.
+//     fn state(&self) -> DxLinkChannelState;
 
-    /// Add a listener for channel state changes.
-    /// If channel is ready to use, listener will be called immediately with DxLinkChannelState::Opened state.
-    /// Note: when remote endpoint reconnects, channel will be reopened and listener will be called with
-    /// DxLinkChannelState::Opened state again.
-    fn add_state_change_listener(&mut self, listener: ChannelStateChangeListener);
+//     /// Add a listener for channel state changes.
+//     /// If channel is ready to use, listener will be called immediately with DxLinkChannelState::Opened state.
+//     /// Note: when remote endpoint reconnects, channel will be reopened and listener will be called with
+//     /// DxLinkChannelState::Opened state again.
+//     fn add_state_change_listener(&mut self, listener: ChannelStateChangeListener);
 
-    /// Remove a listener for channel state changes.
-    fn remove_state_change_listener(&mut self, listener: ChannelStateChangeListener);
+//     /// Remove a listener for channel state changes.
+//     fn remove_state_change_listener(&mut self, listener: ChannelStateChangeListener);
 
-    /// Add a listener for errors from the server.
-    fn add_error_listener(&mut self, listener: ChannelErrorListener);
+//     /// Add a listener for errors from the server.
+//     fn add_error_listener(&mut self, listener: ChannelErrorListener);
 
-    /// Remove a listener for errors from the server.
-    fn remove_error_listener(&mut self, listener: ChannelErrorListener);
+//     /// Remove a listener for errors from the server.
+//     fn remove_error_listener(&mut self, listener: ChannelErrorListener);
 
-    /// Close the channel and free all resources.
-    /// This method does nothing if the channel is already closed.
-    /// The channel state immediately becomes Closed.
-    fn close(&mut self);
-}
+//     /// Close the channel and free all resources.
+//     /// This method does nothing if the channel is already closed.
+//     /// The channel state immediately becomes Closed.
+//     fn close(&mut self);
+// }
 
 #[cfg(test)]
 mod tests {

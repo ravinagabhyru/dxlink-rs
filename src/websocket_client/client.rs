@@ -1,17 +1,16 @@
-use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use crate::core::{
     auth::{AuthStateChangeListener, DxLinkAuthState},
-    channel::{DxLinkChannel, DxLinkChannelState},
+    channel::DxLinkChannelState,
     client::{
-        ConnectionStateChangeListener, DxLinkClient, DxLinkConnectionDetails, DxLinkConnectionState,
+        ConnectionStateChangeListener, DxLinkConnectionDetails, DxLinkConnectionState,
     },
     errors::{DxLinkError, DxLinkErrorType, ErrorListener},
 };
@@ -38,7 +37,7 @@ pub struct DxLinkWebSocketClient {
     connection_state: Arc<Mutex<DxLinkConnectionState>>,
     auth_state: Arc<Mutex<DxLinkAuthState>>,
     last_auth_token: Arc<Mutex<Option<String>>>,
-    channels: Arc<Mutex<HashMap<u64, Arc<DxLinkWebSocketChannel>>>>,
+    channels: HashMap<u64, Arc<DxLinkWebSocketChannel>>,
     next_channel_id: Arc<Mutex<u64>>,
     reconnect_attempts: Arc<Mutex<u32>>,
     last_received: Arc<Mutex<u64>>,
@@ -57,7 +56,7 @@ impl DxLinkWebSocketClient {
             connection_state: Arc::new(Mutex::new(DxLinkConnectionState::NotConnected)),
             auth_state: Arc::new(Mutex::new(DxLinkAuthState::Unauthorized)),
             last_auth_token: Arc::new(Mutex::new(None)),
-            channels: Arc::new(Mutex::new(HashMap::new())),
+            channels: HashMap::new(),
             next_channel_id: Arc::new(Mutex::new(1)),
             reconnect_attempts: Arc::new(Mutex::new(0)),
             last_received: Arc::new(Mutex::new(0)),
@@ -196,10 +195,7 @@ impl DxLinkWebSocketClient {
             &self.config,
         ));
 
-        self.channels
-            .lock()
-            .await
-            .insert(channel_id, channel.clone());
+        self.channels.insert(channel_id, channel.clone());
 
         // Send channel request immediately if connected and authorized
         if *self.connection_state.lock().await == DxLinkConnectionState::Connected
@@ -372,7 +368,7 @@ impl DxLinkWebSocketClient {
         } else if is_channel_message(&message) {
             let channel_id = message.channel();
             if channel_id > 0 {
-                if let Some(channel) = self.channels.lock().await.get(&channel_id) {
+                if let Some(channel) = self.channels.get(&channel_id) {
                     if message.message_type() == "ERROR" {
                         if let Some(error_msg) = message.as_any().downcast_ref::<ErrorMessage>() {
                             debug!("Received error message: {}", error_msg.message);
@@ -502,7 +498,7 @@ impl DxLinkWebSocketClient {
 
         self.set_connection_state(DxLinkConnectionState::Connecting);
 
-        for channel in self.channels.lock().await.values() {
+        for channel in self.channels.values() {
             if channel.state() != DxLinkChannelState::Closed {
                 channel.process_status_requested();
             }
@@ -565,47 +561,6 @@ impl DxLinkWebSocketClient {
         });
     }
 
-    async fn request_active_channels(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut to_remove = Vec::new();
-
-        for (id, channel) in self.channels.lock().await.iter() {
-            if channel.state() == DxLinkChannelState::Closed {
-                to_remove.push(*id);
-            } else {
-                channel.request().await?;
-            }
-        }
-
-        // Clean up closed channels
-        let mut channels = self.channels.lock().await;
-        for id in to_remove {
-            channels.remove(&id);
-        }
-
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl DxLinkClient for DxLinkWebSocketClient {
-    async fn connect(&mut self, url: String) {
-        if let Err(e) = DxLinkWebSocketClient::connect(self, url).await {
-            error!("Failed to connect: {}", e);
-        }
-    }
-
-    async fn reconnect(&mut self) {
-        if let Err(e) = DxLinkWebSocketClient::reconnect(self).await {
-            error!("Failed to reconnect: {}", e);
-        }
-    }
-
-    async fn disconnect(&mut self) {
-        if let Err(e) = DxLinkWebSocketClient::disconnect(self).await {
-            error!("Failed to disconnect: {}", e);
-        }
-    }
-
     async fn get_connection_state(&self) -> DxLinkConnectionState {
         *self.connection_state.lock().await
     }
@@ -614,7 +569,7 @@ impl DxLinkClient for DxLinkWebSocketClient {
         *self.auth_state.lock().await
     }
 
-    async fn add_connection_state_change_listener(
+    pub async fn add_connection_state_change_listener(
         &mut self,
         listener: ConnectionStateChangeListener,
     ) {
@@ -625,36 +580,22 @@ impl DxLinkClient for DxLinkWebSocketClient {
             .insert(id, listener);
     }
 
-    async fn add_auth_state_change_listener(&mut self, listener: AuthStateChangeListener) {
+    pub async fn add_auth_state_change_listener(&mut self, listener: AuthStateChangeListener) {
         let id = Uuid::new_v4();
         self.auth_state_listeners.lock().await.insert(id, listener);
     }
 
-    async fn add_error_listener(&mut self, listener: ErrorListener) {
-        let id = Uuid::new_v4();
-        self.error_listeners.lock().await.insert(id, listener);
-    }
-
-    async fn get_connection_details(&self) -> &DxLinkConnectionDetails {
+    pub async fn get_connection_details(&self) -> &DxLinkConnectionDetails {
         let details = self.connection_details.lock().await;
         // TODO: this is not ideal, fix it later
         Box::leak(Box::new(details.clone()))
     }
 
-    async fn remove_connection_state_change_listener(
+    pub async fn remove_connection_state_change_listener(
         &mut self,
         _listener: ConnectionStateChangeListener,
     ) {
         // TODO: Implement removal by comparing function pointers or using an ID system
-    }
-
-    async fn set_auth_token(&mut self, token: String) {
-        let client = self.clone();
-        tokio::spawn(async move {
-            if let Err(e) = client.set_auth_token(token).await {
-                error!("Failed to set auth token: {}", e);
-            }
-        });
     }
 
     async fn remove_auth_state_change_listener(&mut self, _listener: AuthStateChangeListener) {
@@ -685,27 +626,142 @@ impl DxLinkClient for DxLinkWebSocketClient {
     //     }
     // }
 
-    async fn open_channel(
+    pub async fn open_channel(
         &mut self,
         service: String,
         parameters: serde_json::Value,
-    ) -> Box<dyn DxLinkChannel + Send + Sync> {
+    ) -> Arc<DxLinkWebSocketChannel> {
         debug!("Opening channel in DxLinkClient implementation with service: {}", service);
         match self.open_channel_internal(service, parameters).await {
-            Ok(channel) => Box::new(channel),
+            Ok(channel) => channel,
             Err(e) => {
                 error!("Failed to open channel: {}", e);
                 panic!("Failed to open channel: {}", e); // TODO: Better error handling
             }
         }
     }
-
-    async fn close(&mut self) {
-        if let Err(e) = DxLinkWebSocketClient::disconnect(self).await {
-            error!("Failed to close: {}", e);
-        }
-    }
 }
+
+// #[async_trait]
+// impl DxLinkClient for DxLinkWebSocketClient {
+    // async fn connect(&mut self, url: String) {
+    //     if let Err(e) = DxLinkWebSocketClient::connect(self, url).await {
+    //         error!("Failed to connect: {}", e);
+    //     }
+    // }
+
+    // async fn reconnect(&mut self) {
+    //     if let Err(e) = DxLinkWebSocketClient::reconnect(self).await {
+    //         error!("Failed to reconnect: {}", e);
+    //     }
+    // }
+
+    // async fn disconnect(&mut self) {
+    //     if let Err(e) = DxLinkWebSocketClient::disconnect(self).await {
+    //         error!("Failed to disconnect: {}", e);
+    //     }
+    // }
+
+    // async fn get_connection_state(&self) -> DxLinkConnectionState {
+    //     *self.connection_state.lock().await
+    // }
+
+    // async fn get_auth_state(&self) -> DxLinkAuthState {
+    //     *self.auth_state.lock().await
+    // }
+
+    // async fn add_connection_state_change_listener(
+    //     &mut self,
+    //     listener: ConnectionStateChangeListener,
+    // ) {
+    //     let id = Uuid::new_v4();
+    //     self.connection_state_listeners
+    //         .lock()
+    //         .await
+    //         .insert(id, listener);
+    // }
+
+    // async fn add_auth_state_change_listener(&mut self, listener: AuthStateChangeListener) {
+    //     let id = Uuid::new_v4();
+    //     self.auth_state_listeners.lock().await.insert(id, listener);
+    // }
+
+    // async fn add_error_listener(&mut self, listener: ErrorListener) {
+    //     let id = Uuid::new_v4();
+    //     self.error_listeners.lock().await.insert(id, listener);
+    // }
+
+    // async fn get_connection_details(&self) -> &DxLinkConnectionDetails {
+    //     let details = self.connection_details.lock().await;
+    //     // TODO: this is not ideal, fix it later
+    //     Box::leak(Box::new(details.clone()))
+    // }
+
+    // async fn remove_connection_state_change_listener(
+    //     &mut self,
+    //     _listener: ConnectionStateChangeListener,
+    // ) {
+    //     // TODO: Implement removal by comparing function pointers or using an ID system
+    // }
+
+    // async fn set_auth_token(&mut self, token: String) {
+    //     let client = self.clone();
+    //     tokio::spawn(async move {
+    //         if let Err(e) = client.set_auth_token(token).await {
+    //             error!("Failed to set auth token: {}", e);
+    //         }
+    //     });
+    // }
+
+    // async fn remove_auth_state_change_listener(&mut self, _listener: AuthStateChangeListener) {
+    //     // TODO: Implement removal by comparing function pointers or using an ID system
+    // }
+
+    // async fn remove_error_listener(&mut self, _listener: ErrorListener) {
+    //     // TODO: Implement removal by comparing function pointers or using an ID system
+    // }
+
+    // // async fn open_channel(
+    // //     &mut self,
+    // //     service: String,
+    // //     parameters: HashMap<String, Value>,
+    // // ) -> Box<dyn DxLinkChannel + Send + Sync> {
+    // //     match DxLinkWebSocketClient::open_channel(
+    // //         self,
+    // //         service,
+    // //         serde_json::to_value(parameters).unwrap(),
+    // //     )
+    // //     .await
+    // //     {
+    // //         Ok(channel) => Box::new(channel),
+    // //         Err(e) => {
+    // //             error!("Failed to open channel: {}", e);
+    // //             panic!("Failed to open channel: {}", e); // TODO: Better error handling
+    // //         }
+    // //     }
+    // // }
+
+    // async fn open_channel(
+    //     &mut self,
+    //     service: String,
+    //     parameters: serde_json::Value,
+    // ) -> Box<dyn DxLinkChannel + Send + Sync> {
+    //     debug!("Opening channel in DxLinkClient implementation with service: {}", service);
+    //     match self.open_channel_internal(service, parameters).await {
+    //         Ok(channel) => Box::new(channel),
+    //         Err(e) => {
+    //             error!("Failed to open channel: {}", e);
+    //             panic!("Failed to open channel: {}", e); // TODO: Better error handling
+    //         }
+    //     }
+    // }
+
+    // async fn close(&mut self) {
+    //     if let Err(e) = DxLinkWebSocketClient::disconnect(self).await {
+    //         error!("Failed to close: {}", e);
+    //     }
+    // }
+// }
 
 impl Clone for DxLinkWebSocketClient {
     fn clone(&self) -> Self {

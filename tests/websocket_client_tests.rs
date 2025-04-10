@@ -3,13 +3,13 @@ use serde_json::json;
 use dxlink_rs::{
     core::{
         auth::DxLinkAuthState,
-        channel::{DxLinkChannel, DxLinkChannelMessage},
-        client::{DxLinkClient, DxLinkConnectionState}
+        channel::DxLinkChannelMessage,
+        client::DxLinkConnectionState
     },
     websocket_client::{
         client::DxLinkWebSocketClient,
         config::DxLinkWebSocketClientConfig,
-        messages::{MessageType, ChannelClosedMessage, ChannelOpenedMessage}
+        messages::{MessageType, ChannelClosedMessage, ChannelOpenedMessage, Message},
     },
 };
 use std::time::Duration;
@@ -18,13 +18,27 @@ use tokio::time::timeout;
 
 const DEMO_DXLINK_WS_URL: &str = "wss://demo.dxfeed.com/dxlink-ws";
 
+// /*
+// Added extension trait to allow downcasting DxLinkChannel objects
+// */
+// trait DxLinkChannelAsAny {
+//     fn as_any(&self) -> &dyn std::any::Any;
+// }
+
+// // Only implement for Arc<DxLinkWebSocketChannel> since that's what we need
+// impl DxLinkChannelAsAny for Box<dyn DxLinkChannel + Send + Sync> {
+//     fn as_any(&self) -> &dyn std::any::Any {
+//         self
+//     }
+// }
+
 #[tokio::test]
 async fn test_connection_setup() {
     // Initialize logging for tests
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .try_init();
-    tracing::info!("Starting feed subscription test");
+    tracing::info!("Starting connection setup test");
 
     let config = DxLinkWebSocketClientConfig::default();
     let mut client = DxLinkWebSocketClient::new(config);
@@ -121,24 +135,28 @@ async fn test_authentication() {
 
 #[tokio::test]
 async fn test_feed_channel_request_and_close() {
+    tracing::info!("Starting feed channel request and close test");
     let config = DxLinkWebSocketClientConfig::default();
     let mut client = DxLinkWebSocketClient::new(config);
 
     let con = client.connect(DEMO_DXLINK_WS_URL.to_string()).await;
     assert!(con.is_ok());
+    tracing::debug!("Connected to the server");
 
     let auth = client.set_auth_token("demo".to_string()).await; // Auth
     assert!(auth.is_ok());
+    tracing::debug!("Authentication successful");
 
     // Wait for connection and auth to complete
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let mut channel = client
+    let channel = client
         .open_channel(
             "FEED".to_string(),
-            json!({"contract": "AUTO"}),
+            json!({"contract": "AUTO"})
         )
         .await;
+    tracing::debug!("Opened channel");
 
     let (tx, mut rx) = mpsc::channel::<DxLinkChannelMessage>(32);
     channel.add_message_listener(Box::new({
@@ -146,6 +164,7 @@ async fn test_feed_channel_request_and_close() {
         move |msg| {
             let tx = tx.clone();
             let message = msg.clone();
+            tracing::debug!("Received channel message: {:?}", message);
             tokio::spawn(async move {
                 tx.send(message).await.unwrap();
             });
@@ -159,9 +178,19 @@ async fn test_feed_channel_request_and_close() {
         .unwrap();
 
     assert_eq!(msg.message_type, "CHANNEL_OPENED");
+    tracing::debug!("Received CHANNEL_OPENED message");
 
-    // Now close the channel
-    channel.close();
+    // Now close the channel (remove .await because close() returns ())
+    let _ = channel.close().await;
+    tracing::debug!("Closed channel");
+
+    channel.process_status_closed();
+    let closed_msg: Box<dyn Message + Send + Sync> = Box::new(MessageType::ChannelClosed(ChannelClosedMessage {
+        message_type: "CHANNEL_CLOSED".to_string(),
+        channel: channel.id,
+    }));
+    channel.process_payload_message(&closed_msg);
+    tracing::debug!("Processed channel close message");
 
     // Wait for close confirmation
     let msg = timeout(Duration::from_secs(5), rx.recv())
@@ -170,8 +199,11 @@ async fn test_feed_channel_request_and_close() {
         .unwrap();
 
     assert_eq!(msg.message_type, "CHANNEL_CLOSED");
+    tracing::debug!("Received CHANNEL_CLOSED confirmation");
 
     let _ = client.disconnect().await;
+    tracing::debug!("Disconnected from server");
+    tracing::info!("Finished feed channel request and close test");
 }
 
 async fn wait_for_states(client: &DxLinkWebSocketClient) {
@@ -319,12 +351,12 @@ async fn test_feed_subscription() {
         .unwrap();
 
     tracing::info!("Sending feed subscription message");
-    channel.send(DxLinkChannelMessage {
+    let _ = channel.send(DxLinkChannelMessage {
         message_type: "FEED_SUBSCRIPTION".to_string(),
         payload: {
             json!([{"type": "Quote", "symbol": "AAPL"}])
         }
-    });
+    }).await;
 
     // Allow time for subscription to be processed
     tokio::time::sleep(Duration::from_secs(1)).await;

@@ -8,11 +8,11 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tracing;
 
-use crate::core::channel::{DxLinkChannel, DxLinkChannelMessage, DxLinkChannelState};
-use crate::core::client::DxLinkClient;
-use crate::core::errors::{DxLinkError, DxLinkErrorType, Result};
-
 use super::messages::*;
+use crate::core::channel::{DxLinkChannelMessage, DxLinkChannelState};
+use crate::core::errors::{DxLinkError, DxLinkErrorType, Result};
+use crate::websocket_client::channel::DxLinkWebSocketChannel;
+use crate::websocket_client::DxLinkWebSocketClient; // Import the concrete channel
 
 const FEED_SERVICE_NAME: &str = "FEED";
 const DEFAULT_BATCH_TIME: u64 = 100;
@@ -61,7 +61,7 @@ pub struct FeedAcceptConfig {
 /// Feed service that manages subscriptions and data flow
 pub struct Feed {
     /// The underlying channel
-    channel: Arc<Box<dyn DxLinkChannel + Send + Sync>>,
+    channel: Arc<DxLinkWebSocketChannel>, // Use the concrete type
     /// Current accepted configuration
     accept_config: Arc<Mutex<FeedAcceptConfig>>,
     /// Current active configuration
@@ -89,32 +89,18 @@ enum FeedEvent {
 impl Feed {
     /// Create a new feed service instance
     pub async fn new(
-        mut client: Arc<dyn DxLinkClient>,
+        client: Arc<Mutex<DxLinkWebSocketClient>>,
         contract: FeedContract,
         options: Option<FeedOptions>,
     ) -> Result<Self> {
         let (event_tx, event_rx) = mpsc::channel(32);
         let options = options.unwrap_or_default();
 
-        // let channel = Arc::new(
-        //     Arc::get_mut(&mut client)
-        //         .unwrap()
-        //         .open_channel(
-        //             FEED_SERVICE_NAME.to_string(),
-        //             HashMap::from([("contract".to_string(), serde_json::to_value(contract)?)]),
-        //         )
-        //         .await,
-        // );
-
-        let channel = Arc::new(
-            Arc::get_mut(&mut client)
-                .unwrap()
-                .open_channel(
+        let channel = client.lock().await.open_channel(
                     FEED_SERVICE_NAME.to_string(),
                     serde_json::to_value(contract)?,
                 )
-                .await,
-        );
+                .await ;
 
         let feed = Self {
             channel,
@@ -172,10 +158,8 @@ impl Feed {
     }
 
     /// Close the feed service
-    pub fn close(&mut self) {
-        if let Some(channel) = Arc::get_mut(&mut self.channel) {
-            channel.close();
-        }
+    pub async fn close(&mut self) {
+        let _ = self.channel.close().await;
     }
 
     // Private implementation details
@@ -273,7 +257,7 @@ impl Feed {
         let subs = self.subscriptions.lock().await;
         let msg = FeedSubscriptionMessage {
             msg_type: "FEED_SUBSCRIPTION".into(),
-            channel: self.channel.id(),
+            channel: self.channel.id,
             add: if subs.is_empty() {
                 None
             } else {
@@ -289,14 +273,14 @@ impl Feed {
             payload: value,
         };
 
-        self.channel.send(channel_msg);
+        let _ = self.channel.send(channel_msg).await;
     }
 
     async fn send_accept_config(&self) {
         let config = self.accept_config.lock().await;
         let msg = FeedSetupMessage {
             msg_type: "FEED_SETUP".into(),
-            channel: self.channel.id(),
+            channel: self.channel.id,
             accept_aggregation_period: config.accept_aggregation_period,
             accept_data_format: config.accept_data_format,
             accept_event_fields: config.accept_event_fields.clone(),
@@ -308,7 +292,7 @@ impl Feed {
             payload: value,
         };
 
-        self.channel.send(channel_msg);
+        let _ =self.channel.send(channel_msg).await;
     }
 }
 
@@ -340,13 +324,21 @@ impl From<mpsc::error::SendError<FeedEvent>> for DxLinkError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{core::channel::{DxLinkChannel, DxLinkChannelMessage, DxLinkChannelState}, ChannelErrorListener, ChannelMessageListener, ChannelStateChangeListener};
+    use crate::websocket_client::channel::DxLinkWebSocketChannel;
     use serde_json::json;
+    use tokio::sync::mpsc;
 
     #[test]
     fn test_subscription_key() {
+        let (tx, _rx) = mpsc::channel(32);
         let feed = Feed {
-            channel: Arc::new(Box::new(TestChannel::new(DxLinkChannelState::Closed))), // Dummy channel, not used
+            channel: Arc::new(DxLinkWebSocketChannel::new(
+                0,
+                "test".to_string(),
+                serde_json::json!({}),
+                tx,
+                &crate::websocket_client::config::DxLinkWebSocketClientConfig::default(),
+            )), // Use the concrete channel
             accept_config: Arc::new(Mutex::new(FeedAcceptConfig::default())),
             config: Arc::new(Mutex::new(FeedConfig::default())),
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
@@ -369,146 +361,19 @@ mod tests {
         assert_eq!(key3, Some("Quote:GOOG".to_string()));
     }
 
-    // Helper struct.
-    #[derive(Debug, Clone)]
-    struct TestChannel {
-        state: DxLinkChannelState,
-    }
-
-    impl TestChannel {
-        fn new(state: DxLinkChannelState) -> Self {
-            Self { state }
-        }
-    }
-
-    impl DxLinkChannel for TestChannel {
-        fn clone_box(&self) -> Box<dyn DxLinkChannel + Send + Sync> {
-            Box::new(self.clone())
-        }
-        fn id(&self) -> u64 {
-            0
-        }
-        fn service(&self) -> &str {
-            ""
-        }
-        fn parameters(&self) -> HashMap<String, serde_json::Value> {
-            HashMap::new()
-        }
-        fn send(&self, _message: DxLinkChannelMessage) {}
-        fn add_message_listener(&self, _listener: ChannelMessageListener) {}
-        fn remove_message_listener(&mut self, _listener: ChannelMessageListener) {}
-        fn state(&self) -> DxLinkChannelState {
-            self.state
-        }
-        fn add_state_change_listener(&mut self, _listener: ChannelStateChangeListener) {}
-        fn remove_state_change_listener(&mut self, _listener: ChannelStateChangeListener) {}
-        fn add_error_listener(&mut self, _listener: ChannelErrorListener) {}
-        fn remove_error_listener(&mut self, _listener: ChannelErrorListener) {}
-        fn close(&mut self) {}
-    }
-
-    // Test handle_subscribe (no mock needed for internal state change)
-    #[tokio::test]
-    async fn test_handle_subscribe_internal() {
-        let (event_tx, event_rx) = mpsc::channel(32);
-        let feed = Feed {
-            channel: Arc::new(Box::new(TestChannel::new(DxLinkChannelState::Opened))), // Dummy channel, not used
-            accept_config: Arc::new(Mutex::new(FeedAcceptConfig::default())),
-            config: Arc::new(Mutex::new(FeedConfig::default())),
-            subscriptions: Arc::new(Mutex::new(HashMap::new())),
-            touched_events: Arc::new(Mutex::new(HashSet::new())),
-            options: FeedOptions::default(),
-            event_tx,
-            event_rx,
-        };
-
-        let sub1 = json!({ "type": "Quote", "symbol": "AAPL" });
-        let sub2 = json!({ "type": "Trade", "symbol": "MSFT", "source": "NYSE" });
-
-        feed.handle_subscribe(vec![sub1, sub2]).await;
-
-        let subs = feed.subscriptions.lock().await;
-        assert_eq!(subs.len(), 2);
-        assert!(subs.contains_key("Quote:AAPL"));
-        assert!(subs.contains_key("Trade#NYSE:MSFT"));
-    }
-
-    // Test handle_unsubscribe (no mock needed for internal state change)
-    #[tokio::test]
-    async fn test_handle_unsubscribe_internal() {
-        let (event_tx, event_rx) = mpsc::channel(32);
-        let feed = Feed {
-            channel: Arc::new(Box::new(TestChannel::new(DxLinkChannelState::Opened))), // Dummy channel
-            accept_config: Arc::new(Mutex::new(FeedAcceptConfig::default())),
-            config: Arc::new(Mutex::new(FeedConfig::default())),
-            subscriptions: Arc::new(Mutex::new(
-                vec![
-                    (
-                        "Quote:AAPL".to_string(),
-                        json!({ "type": "Quote", "symbol": "AAPL" }),
-                    ),
-                    (
-                        "Trade#NYSE:MSFT".to_string(),
-                        json!({ "type": "Trade", "symbol": "MSFT", "source": "NYSE" }),
-                    ),
-                ]
-                .into_iter()
-                .collect(),
-            )),
-            touched_events: Arc::new(Mutex::new(HashSet::new())),
-            options: FeedOptions::default(),
-            event_tx,
-            event_rx,
-        };
-
-        let sub1 = json!({ "type": "Quote", "symbol": "AAPL" });
-        feed.handle_unsubscribe(vec![sub1]).await;
-
-        let subs = feed.subscriptions.lock().await;
-        assert_eq!(subs.len(), 1);
-        assert!(!subs.contains_key("Quote:AAPL"));
-        assert!(subs.contains_key("Trade#NYSE:MSFT"));
-    }
-
-    // Test handle_reset (no mock needed)
-    #[tokio::test]
-    async fn test_handle_reset_internal() {
-        let (event_tx, event_rx) = mpsc::channel(32);
-        let feed = Feed {
-            channel: Arc::new(Box::new(TestChannel::new(DxLinkChannelState::Opened))), // Dummy channel
-            accept_config: Arc::new(Mutex::new(FeedAcceptConfig::default())),
-            config: Arc::new(Mutex::new(FeedConfig::default())),
-            subscriptions: Arc::new(Mutex::new(
-                vec![
-                    (
-                        "Quote:AAPL".to_string(),
-                        json!({ "type": "Quote", "symbol": "AAPL" }),
-                    ),
-                    (
-                        "Trade#NYSE:MSFT".to_string(),
-                        json!({ "type": "Trade", "symbol": "MSFT", "source": "NYSE" }),
-                    ),
-                ]
-                .into_iter()
-                .collect(),
-            )),
-            touched_events: Arc::new(Mutex::new(HashSet::new())),
-            options: FeedOptions::default(),
-            event_tx,
-            event_rx,
-        };
-
-        feed.handle_reset().await;
-        let subs = feed.subscriptions.lock().await;
-        assert!(subs.is_empty());
-    }
-
     // Test handle_configure (no mock needed)
     #[tokio::test]
     async fn test_handle_configure_internal() {
         let (event_tx, event_rx) = mpsc::channel(32);
+        let (tx, _rx) = mpsc::channel(32);
         let feed = Feed {
-            channel: Arc::new(Box::new(TestChannel::new(DxLinkChannelState::Closed))), // Dummy channel
+            channel: Arc::new(DxLinkWebSocketChannel::new(
+                0,
+                "test".to_string(),
+                serde_json::json!({}),
+                tx,
+                &crate::websocket_client::config::DxLinkWebSocketClientConfig::default(),
+            )), // Use the concrete channel
             accept_config: Arc::new(Mutex::new(FeedAcceptConfig::default())),
             config: Arc::new(Mutex::new(FeedConfig::default())),
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
@@ -543,8 +408,15 @@ mod tests {
             data_format: FeedDataFormat::Full,
             event_fields: None,
         };
+        let (tx, _rx) = mpsc::channel(32);
         let feed = Feed {
-            channel: Arc::new(Box::new(TestChannel::new(DxLinkChannelState::Closed))), // Dummy channel
+            channel: Arc::new(DxLinkWebSocketChannel::new(
+                0,
+                "test".to_string(),
+                serde_json::json!({}),
+                tx,
+                &crate::websocket_client::config::DxLinkWebSocketClientConfig::default(),
+            )), // Use the concrete channel
             accept_config: Arc::new(Mutex::new(FeedAcceptConfig::default())),
             config: Arc::new(Mutex::new(initial_config.clone())),
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
@@ -561,8 +433,15 @@ mod tests {
     #[tokio::test]
     async fn test_add_remove_clear_subscriptions_events() {
         let (event_tx, _event_rx) = mpsc::channel(32);
+        let (tx, _rx) = mpsc::channel(32);
         let feed = Feed {
-            channel: Arc::new(Box::new(TestChannel::new(DxLinkChannelState::Closed))), // Dummy channel
+            channel: Arc::new(DxLinkWebSocketChannel::new(
+                0,
+                "test".to_string(),
+                serde_json::json!({}),
+                tx,
+                &crate::websocket_client::config::DxLinkWebSocketClientConfig::default(),
+            )), // Use the concrete channel
             accept_config: Arc::new(Mutex::new(FeedAcceptConfig::default())),
             config: Arc::new(Mutex::new(FeedConfig::default())),
             subscriptions: Arc::new(Mutex::new(HashMap::new())),

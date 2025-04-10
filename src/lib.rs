@@ -31,11 +31,11 @@ pub fn init() {
 // Re-export main types for convenient usage
 pub use crate::core::errors::{DxLinkError, DxLinkErrorType, Result};
 pub use crate::core::client::{
-    DxLinkClient, DxLinkConnectionDetails, DxLinkConnectionState,
+    DxLinkConnectionDetails, DxLinkConnectionState,
     ConnectionStateChangeListener,
 };
 pub use crate::core::channel::{
-    DxLinkChannel, ChannelMessageListener, ChannelStateChangeListener, ChannelErrorListener,
+    ChannelMessageListener, ChannelStateChangeListener, ChannelErrorListener,
     DxLinkChannelMessage, DxLinkChannelState,
 };
 pub use crate::feed::{

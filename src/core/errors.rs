@@ -53,6 +53,83 @@ impl DxLinkError {
     }
 }
 
+/// Channel-specific error types
+#[derive(Debug, thiserror::Error)]
+pub enum ChannelError {
+    #[error("Invalid state transition from {from:?} to {to:?}")]
+    InvalidStateTransition {
+        from: super::channel::DxLinkChannelState,
+        to: super::channel::DxLinkChannelState,
+    },
+
+    #[error("Channel not ready. Current state: {state:?}")]
+    NotReady {
+        state: super::channel::DxLinkChannelState,
+    },
+
+    #[error("Unsupported message type: {message_type}. Supported types: {supported}")]
+    UnsupportedMessageType {
+        message_type: String,
+        supported: String,
+    },
+
+    #[error("Invalid message payload: {0}")]
+    InvalidPayload(String),
+
+    #[error("Send error: {0}")]
+    SendError(String),
+
+    #[error("Operation timeout after {timeout_secs} seconds")]
+    Timeout {
+        timeout_secs: u64,
+    },
+
+    #[error("Channel closed")]
+    Closed,
+
+    #[error(transparent)]
+    Other(#[from] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl From<ChannelError> for DxLinkError {
+    fn from(err: ChannelError) -> Self {
+        match err {
+            ChannelError::InvalidStateTransition { .. } => DxLinkError {
+                error_type: DxLinkErrorType::BadAction,
+                message: err.to_string(),
+            },
+            ChannelError::NotReady { .. } => DxLinkError {
+                error_type: DxLinkErrorType::BadAction,
+                message: err.to_string(),
+            },
+            ChannelError::UnsupportedMessageType { .. } => DxLinkError {
+                error_type: DxLinkErrorType::InvalidMessage,
+                message: err.to_string(),
+            },
+            ChannelError::InvalidPayload(_) => DxLinkError {
+                error_type: DxLinkErrorType::InvalidMessage,
+                message: err.to_string(),
+            },
+            ChannelError::SendError(_) => DxLinkError {
+                error_type: DxLinkErrorType::Unknown,
+                message: err.to_string(),
+            },
+            ChannelError::Timeout { .. } => DxLinkError {
+                error_type: DxLinkErrorType::Timeout,
+                message: err.to_string(),
+            },
+            ChannelError::Closed => DxLinkError {
+                error_type: DxLinkErrorType::BadAction,
+                message: err.to_string(),
+            },
+            ChannelError::Other(e) => DxLinkError {
+                error_type: DxLinkErrorType::Unknown,
+                message: e.to_string(),
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
