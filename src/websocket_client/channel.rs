@@ -210,8 +210,9 @@ impl DxLinkWebSocketChannel {
         {
             Ok(result) => {
                 result.map_err(|e| ChannelError::SendError(e.to_string()))?;
-                // Set state to Closed but do not clear listeners; let the server reply trigger process_status_closed()
-                self.set_state(DxLinkChannelState::Closed);
+                // Change to Requested state to indicate we're waiting for server confirmation
+                // The server will respond with CHANNEL_CLOSED, which will trigger process_status_closed()
+                self.process_status_requested();
                 Ok(())
             }
             Err(_) => Err(ChannelError::Timeout {
@@ -351,11 +352,7 @@ impl DxLinkWebSocketChannel {
     }
 
     /// Remove a message listener
-    pub fn remove_message_listener(&mut self, listener: ChannelMessageListener) {
-        let wrapper = CallbackWrapper {
-            id: Uuid::new_v4(),
-            callback: Arc::new(listener),
-        };
+    pub fn remove_message_listener(&mut self, _listener: ChannelMessageListener) {
         // Since we can't compare function pointers directly, we'll remove all listeners
         // This is a temporary solution until we implement a better way to track listeners
         self.message_listeners.lock().unwrap().clear();
@@ -371,11 +368,7 @@ impl DxLinkWebSocketChannel {
     }
 
     /// Remove a state change listener
-    pub fn remove_state_change_listener(&mut self, listener: channel::ChannelStateChangeListener) {
-        let wrapper = CallbackWrapper {
-            id: Uuid::new_v4(),
-            callback: Arc::new(listener),
-        };
+    pub fn remove_state_change_listener(&mut self, _listener: channel::ChannelStateChangeListener) {
         // Since we can't compare function pointers directly, we'll remove all listeners
         // This is a temporary solution until we implement a better way to track listeners
         self.state_listeners.lock().unwrap().clear();
@@ -391,11 +384,7 @@ impl DxLinkWebSocketChannel {
     }
 
     /// Remove an error listener
-    pub fn remove_error_listener(&mut self, listener: channel::ChannelErrorListener) {
-        let wrapper = CallbackWrapper {
-            id: Uuid::new_v4(),
-            callback: Arc::new(listener),
-        };
+    pub fn remove_error_listener(&mut self, _listener: channel::ChannelErrorListener) {
         // Since we can't compare function pointers directly, we'll remove all listeners
         // This is a temporary solution until we implement a better way to track listeners
         self.error_listeners.lock().unwrap().clear();

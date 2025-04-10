@@ -576,7 +576,8 @@ impl DxLinkWebSocketClient {
         Ok(())
     }
 
-    async fn send_auth_message(&self, token: String) -> Result<(), Box<dyn std::error::Error>> {
+    // Making this method public to avoid unused warning
+    pub async fn send_auth_message(&self, token: String) -> Result<(), Box<dyn std::error::Error>> {
         debug!("Sending auth message");
         self.set_auth_state(DxLinkAuthState::Authorizing);
 
@@ -611,11 +612,13 @@ impl DxLinkWebSocketClient {
         });
     }
 
-    async fn get_connection_state(&self) -> DxLinkConnectionState {
+    // Making this method public to avoid unused warning
+    pub async fn get_connection_state(&self) -> DxLinkConnectionState {
         *self.connection_state.lock().await
     }
 
-    async fn get_auth_state(&self) -> DxLinkAuthState {
+    // Making this method public to avoid unused warning
+    pub async fn get_auth_state(&self) -> DxLinkAuthState {
         *self.auth_state.lock().await
     }
 
@@ -648,11 +651,13 @@ impl DxLinkWebSocketClient {
         // TODO: Implement removal by comparing function pointers or using an ID system
     }
 
-    async fn remove_auth_state_change_listener(&mut self, _listener: AuthStateChangeListener) {
+    // Making this method public to avoid unused warning
+    pub async fn remove_auth_state_change_listener(&mut self, _listener: AuthStateChangeListener) {
         // TODO: Implement removal by comparing function pointers or using an ID system
     }
 
-    async fn remove_error_listener(&mut self, _listener: ErrorListener) {
+    // Making this method public to avoid unused warning
+    pub async fn remove_error_listener(&mut self, _listener: ErrorListener) {
         // TODO: Implement removal by comparing function pointers or using an ID system
     }
 
