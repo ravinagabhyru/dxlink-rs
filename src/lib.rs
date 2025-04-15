@@ -45,7 +45,8 @@ pub use crate::feed::{
 pub use crate::feed::messages::
     {FeedSubscriptionEntry, FeedSetupMessage, FeedConfigMessage,
     FeedSubscriptionMessage, FeedDataMessage, FeedData, FeedContract};
-pub use crate::dom::messages::{DomSetupMessage, DomConfigMessage, DomSnapshotMessage};
+pub use crate::dom::messages::{DomSetupMessage, DomConfigMessage, DomSnapshotMessage, BidAskEntry};
+pub use crate::dom::DomService;
 pub use crate::websocket_client::{
     DxLinkWebSocketChannel, DxLinkWebSocketClientConfig, DxLinkLogLevel
 };
