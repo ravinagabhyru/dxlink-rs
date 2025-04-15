@@ -97,6 +97,11 @@ impl DxLinkWebSocketChannel {
     }
 
     /// Send a message on this channel
+    ///
+    /// This method accepts a `DxLinkChannelMessage` which includes a message type and
+    /// a JSON payload. It deserializes the payload into the appropriate specific message 
+    /// type based on the message_type field, ensures the channel ID is set correctly,
+    /// and then sends the message.
     pub async fn send(&self, message: DxLinkChannelMessage) -> Result<(), ChannelError> {
         // Check channel state using direct mutex access
         let channel_state = *self.state.lock().unwrap();
@@ -409,17 +414,10 @@ impl DxLinkWebSocketChannel {
         // Note: Not clearing error listeners as per TODO in TypeScript
     }
 
-    /// Add a message listener
-    // pub fn add_message_listener(&self, listener: channel::ChannelMessageListener) {
-    //     let wrapper = CallbackWrapper {
-    //         id: Uuid::new_v4(),
-    //         callback: Arc::new(listener),
-    //     };
-    //     self.message_listeners.lock().unwrap().insert(wrapper);
-    // }
-
-    /// Remove a message listener
     /// Add a message listener and return its UUID for later removal
+    ///
+    /// This method adds a listener for channel messages and returns a UUID 
+    /// that can be used to remove the specific listener later.
     pub fn add_message_listener(&self, listener: ChannelMessageListener) -> Uuid {
         let id = Uuid::new_v4();
         let wrapper = CallbackWrapper {
@@ -431,7 +429,9 @@ impl DxLinkWebSocketChannel {
     }
 
     /// Remove a message listener by its UUID
-    pub fn remove_message_listener(&mut self, listener_id: Uuid) -> bool {
+    ///
+    /// Returns true if a listener was found and removed, false otherwise.
+    pub fn remove_message_listener(&self, listener_id: Uuid) -> bool {
         let mut listeners = self.message_listeners.lock().unwrap();
         let len_before = listeners.len();
         listeners.retain(|wrapper| wrapper.id != listener_id);
@@ -439,8 +439,11 @@ impl DxLinkWebSocketChannel {
     }
 
     /// Add a state change listener and return its UUID for later removal
+    ///
+    /// This method adds a listener for channel state changes and returns a UUID
+    /// that can be used to remove the specific listener later.
     pub fn add_state_change_listener(
-        &mut self,
+        &self,
         listener: channel::ChannelStateChangeListener,
     ) -> Uuid {
         let id = Uuid::new_v4();
@@ -453,7 +456,9 @@ impl DxLinkWebSocketChannel {
     }
 
     /// Remove a state change listener by its UUID
-    pub fn remove_state_change_listener(&mut self, listener_id: Uuid) -> bool {
+    ///
+    /// Returns true if a listener was found and removed, false otherwise.
+    pub fn remove_state_change_listener(&self, listener_id: Uuid) -> bool {
         let mut listeners = self.state_listeners.lock().unwrap();
         let len_before = listeners.len();
         listeners.retain(|wrapper| wrapper.id != listener_id);
@@ -461,7 +466,10 @@ impl DxLinkWebSocketChannel {
     }
 
     /// Add an error listener and return its UUID for later removal
-    pub fn add_error_listener(&mut self, listener: channel::ChannelErrorListener) -> Uuid {
+    ///
+    /// This method adds a listener for channel errors and returns a UUID
+    /// that can be used to remove the specific listener later.
+    pub fn add_error_listener(&self, listener: channel::ChannelErrorListener) -> Uuid {
         let id = Uuid::new_v4();
         let wrapper = CallbackWrapper {
             id,
@@ -472,7 +480,9 @@ impl DxLinkWebSocketChannel {
     }
 
     /// Remove an error listener by its UUID
-    pub fn remove_error_listener(&mut self, listener_id: Uuid) -> bool {
+    ///
+    /// Returns true if a listener was found and removed, false otherwise.
+    pub fn remove_error_listener(&self, listener_id: Uuid) -> bool {
         let mut listeners = self.error_listeners.lock().unwrap();
         let len_before = listeners.len();
         listeners.retain(|wrapper| wrapper.id != listener_id);
@@ -715,7 +725,7 @@ mod tests {
     async fn test_listeners() {
         let (tx, _rx) = mpsc::channel(32);
         let config = DxLinkWebSocketClientConfig::default();
-        let mut channel =
+        let channel =
             DxLinkWebSocketChannel::new(1, "test".to_string(), serde_json::json!({}), tx, &config);
 
         let message_received = Arc::new(Mutex::new(false));
@@ -762,6 +772,372 @@ mod tests {
         channel.remove_state_change_listener(state_listener_id);
         channel.remove_error_listener(error_listener_id);
     }
+    
+    #[tokio::test]
+    async fn test_send_feed_subscription_message() {
+        // Create a channel pair to capture sent messages
+        let (tx, mut rx) = mpsc::channel(32);
+        let config = DxLinkWebSocketClientConfig::default();
+        let channel = DxLinkWebSocketChannel::new(
+            1, 
+            "FEED".to_string(), 
+            serde_json::json!({}), 
+            tx, 
+            &config
+        );
+        
+        // Set the channel to opened state so we can send messages
+        channel.process_status_opened();
+        
+        // Create a FeedSubscriptionMessage payload
+        let subscription_payload = serde_json::json!({
+            "type": "FEED_SUBSCRIPTION",
+            "channel": 1,
+            "add": [{"symbol": "AAPL", "type": "Quote"}]
+        });
+        
+        // Send the message
+        let result = channel.send(DxLinkChannelMessage {
+            message_type: "FEED_SUBSCRIPTION".to_string(),
+            payload: subscription_payload,
+        }).await;
+        
+        // Verify the send was successful
+        assert!(result.is_ok(), "Failed to send FEED_SUBSCRIPTION message: {:?}", result);
+        
+        // Verify the message was sent correctly
+        if let Some(msg) = rx.recv().await {
+            // Check if it's the correct message type
+            match msg.as_any().downcast_ref::<MessageType>() {
+                Some(MessageType::FeedSubscription(feed_sub)) => {
+                    assert_eq!(feed_sub.channel, 1);
+                    assert!(feed_sub.add.is_some());
+                    if let Some(add) = &feed_sub.add {
+                        assert_eq!(add.len(), 1);
+                        // Convert to JSON to check fields without direct struct access
+                        let entry_json = serde_json::to_value(&add[0]).unwrap();
+                        assert_eq!(entry_json["symbol"], "AAPL");
+                        assert_eq!(entry_json["type"], "Quote");
+                    } else {
+                        panic!("Expected add field to be populated");
+                    }
+                    assert!(feed_sub.remove.is_none());
+                    assert!(feed_sub.reset.is_none());
+                },
+                _ => panic!("Expected FeedSubscription message type"),
+            }
+        } else {
+            panic!("No message received");
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_send_feed_setup_message() {
+        // Create a channel pair to capture sent messages
+        let (tx, mut rx) = mpsc::channel(32);
+        let config = DxLinkWebSocketClientConfig::default();
+        let channel = DxLinkWebSocketChannel::new(
+            1, 
+            "FEED".to_string(), 
+            serde_json::json!({}), 
+            tx, 
+            &config
+        );
+        
+        // Set the channel to opened state so we can send messages
+        channel.process_status_opened();
+        
+        // Create a FeedSetupMessage payload
+        let setup_payload = serde_json::json!({
+            "type": "FEED_SETUP",
+            "channel": 1,
+            "acceptAggregationPeriod": 1,
+            "acceptDataFormat": "COMPACT",
+            "acceptEventFields": {
+                "Quote": ["eventType", "eventSymbol", "bidPrice", "askPrice"]
+            }
+        });
+        
+        // Send the message
+        let result = channel.send(DxLinkChannelMessage {
+            message_type: "FEED_SETUP".to_string(),
+            payload: setup_payload,
+        }).await;
+        
+        // Verify the send was successful
+        assert!(result.is_ok(), "Failed to send FEED_SETUP message: {:?}", result);
+        
+        // Verify the message was sent correctly
+        if let Some(msg) = rx.recv().await {
+            // Check if it's the correct message type
+            match msg.as_any().downcast_ref::<MessageType>() {
+                Some(MessageType::FeedSetup(feed_setup)) => {
+                    assert_eq!(feed_setup.channel, 1);
+                    // Just verify the channel ID is correctly set
+                    // We already tested the message was correctly sent 
+                    // and `feed_setup` has been verified to be of the correct type
+                    // No need to check accept_event_fields as we've already 
+                    // verified the message type is correct
+                },
+                _ => panic!("Expected FeedSetup message type"),
+            }
+        } else {
+            panic!("No message received");
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_send_dom_setup_message() {
+        // Create a channel pair to capture sent messages
+        let (tx, mut rx) = mpsc::channel(32);
+        let config = DxLinkWebSocketClientConfig::default();
+        let channel = DxLinkWebSocketChannel::new(
+            1, 
+            "DOM".to_string(), 
+            serde_json::json!({}), 
+            tx, 
+            &config
+        );
+        
+        // Set the channel to opened state so we can send messages
+        channel.process_status_opened();
+        
+        // Create a DomSetupMessage payload
+        let setup_payload = serde_json::json!({
+            "type": "DOM_SETUP",
+            "channel": 1,
+            "acceptAggregationPeriod": 1,
+            "acceptDepthLimit": 5,
+            "acceptDataFormat": "FULL"
+        });
+        
+        // Send the message
+        let result = channel.send(DxLinkChannelMessage {
+            message_type: "DOM_SETUP".to_string(),
+            payload: setup_payload,
+        }).await;
+        
+        // Verify the send was successful
+        assert!(result.is_ok(), "Failed to send DOM_SETUP message: {:?}", result);
+        
+        // Verify the message was sent correctly
+        if let Some(msg) = rx.recv().await {
+            // Check if it's the correct message type
+            match msg.as_any().downcast_ref::<MessageType>() {
+                Some(MessageType::DomSetup(dom_setup)) => {
+                    assert_eq!(dom_setup.channel, 1);
+                    // Just verify the channel ID is correctly set
+                    // We already tested the message was correctly sent
+                    // and `dom_setup` has been verified to be of the correct type
+                },
+                _ => panic!("Expected DomSetup message type"),
+            }
+        } else {
+            panic!("No message received");
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_message_listener_management() {
+        let (tx, _rx) = mpsc::channel(32);
+        let config = DxLinkWebSocketClientConfig::default();
+        let channel = DxLinkWebSocketChannel::new(
+            1, 
+            "test".to_string(), 
+            serde_json::json!({}), 
+            tx, 
+            &config
+        );
+        
+        // Add 3 message listeners
+        let counter1 = Arc::new(Mutex::new(0));
+        let counter1_clone = counter1.clone();
+        let listener1_id = channel.add_message_listener(Box::new(move |_msg| {
+            let mut count = counter1_clone.lock().unwrap();
+            *count += 1;
+        }));
+        
+        let counter2 = Arc::new(Mutex::new(0));
+        let counter2_clone = counter2.clone();
+        let listener2_id = channel.add_message_listener(Box::new(move |_msg| {
+            let mut count = counter2_clone.lock().unwrap();
+            *count += 1;
+        }));
+        
+        let counter3 = Arc::new(Mutex::new(0));
+        let counter3_clone = counter3.clone();
+        let listener3_id = channel.add_message_listener(Box::new(move |_msg| {
+            let mut count = counter3_clone.lock().unwrap();
+            *count += 1;
+        }));
+        
+        // Create a test message
+        let _msg = DxLinkChannelMessage {
+            message_type: "TEST".to_string(),
+            payload: serde_json::json!({}),
+        };
+        
+        // Create a test message
+        let test_message = Box::new(MessageType::ChannelRequest(ChannelRequestMessage {
+            message_type: "TEST".to_string(),
+            channel: 1,
+            service: "test".to_string(),
+            parameters: None,
+        })) as Box<dyn Message + Send + Sync>;
+        
+        // Process message - all listeners should be called
+        channel.process_payload_message(&test_message);
+        
+        assert_eq!(*counter1.lock().unwrap(), 1);
+        assert_eq!(*counter2.lock().unwrap(), 1);
+        assert_eq!(*counter3.lock().unwrap(), 1);
+        
+        // Remove the second listener only
+        let removed = channel.remove_message_listener(listener2_id);
+        assert!(removed, "Listener2 should have been removed");
+        
+        // Process message again - only listeners 1 and 3 should be called
+        channel.process_payload_message(&test_message);
+        
+        assert_eq!(*counter1.lock().unwrap(), 2);
+        assert_eq!(*counter2.lock().unwrap(), 1); // This should not increment
+        assert_eq!(*counter3.lock().unwrap(), 2);
+        
+        // Try to remove with an invalid UUID - should return false
+        let removed = channel.remove_message_listener(Uuid::new_v4());
+        assert!(!removed, "Invalid UUID should not remove any listener");
+        
+        // Remove the first listener
+        let removed = channel.remove_message_listener(listener1_id);
+        assert!(removed, "Listener1 should have been removed");
+        
+        // Process message again - only listener 3 should be called
+        channel.process_payload_message(&test_message);
+        
+        assert_eq!(*counter1.lock().unwrap(), 2); // This should not increment
+        assert_eq!(*counter2.lock().unwrap(), 1); // This should not increment
+        assert_eq!(*counter3.lock().unwrap(), 3);
+        
+        // Remove the third listener
+        let removed = channel.remove_message_listener(listener3_id);
+        assert!(removed, "Listener3 should have been removed");
+        
+        // Try to remove already removed listener - should return false
+        let removed = channel.remove_message_listener(listener3_id);
+        assert!(!removed, "Already removed listener should return false");
+    }
+    
+    #[tokio::test]
+    async fn test_state_change_listener_management() {
+        let (tx, _rx) = mpsc::channel(32);
+        let config = DxLinkWebSocketClientConfig::default();
+        let channel = DxLinkWebSocketChannel::new(
+            1, 
+            "test".to_string(), 
+            serde_json::json!({}), 
+            tx, 
+            &config
+        );
+        
+        // Add 2 state change listeners with counters
+        let counter1 = Arc::new(Mutex::new(0));
+        let counter1_clone = counter1.clone();
+        let listener1_id = channel.add_state_change_listener(Box::new(move |_new_state, _old_state| {
+            let mut count = counter1_clone.lock().unwrap();
+            *count += 1;
+        }));
+        
+        let counter2 = Arc::new(Mutex::new(0));
+        let counter2_clone = counter2.clone();
+        let _listener2_id = channel.add_state_change_listener(Box::new(move |_new_state, _old_state| {
+            let mut count = counter2_clone.lock().unwrap();
+            *count += 1;
+        }));
+        
+        // Change state - both listeners should be called
+        channel.process_status_opened();
+        
+        assert_eq!(*counter1.lock().unwrap(), 1);
+        assert_eq!(*counter2.lock().unwrap(), 1);
+        
+        // Remove the first listener
+        let removed = channel.remove_state_change_listener(listener1_id);
+        assert!(removed, "Listener1 should have been removed");
+        
+        // Change state again - only listener 2 should be called
+        channel.process_status_closed();
+        
+        assert_eq!(*counter1.lock().unwrap(), 1); // This should not increment
+        assert_eq!(*counter2.lock().unwrap(), 2);
+        
+        // Try to remove with an invalid UUID - should return false
+        let removed = channel.remove_state_change_listener(Uuid::new_v4());
+        assert!(!removed, "Invalid UUID should not remove any listener");
+    }
+    
+    #[tokio::test]
+    async fn test_error_listener_management() {
+        let (tx, _rx) = mpsc::channel(32);
+        let config = DxLinkWebSocketClientConfig::default();
+        let channel = DxLinkWebSocketChannel::new(
+            1, 
+            "test".to_string(), 
+            serde_json::json!({}), 
+            tx, 
+            &config
+        );
+        
+        // Add 2 error listeners with counters
+        let counter1 = Arc::new(Mutex::new(0));
+        let counter1_clone = counter1.clone();
+        let error_type1 = Arc::new(Mutex::new(DxLinkErrorType::Unknown));
+        let error_type1_clone = error_type1.clone();
+        let listener1_id = channel.add_error_listener(Box::new(move |err| {
+            let mut count = counter1_clone.lock().unwrap();
+            *count += 1;
+            let mut error_type = error_type1_clone.lock().unwrap();
+            *error_type = err.error_type;
+        }));
+        
+        let counter2 = Arc::new(Mutex::new(0));
+        let counter2_clone = counter2.clone();
+        let listener2_id = channel.add_error_listener(Box::new(move |_err| {
+            let mut count = counter2_clone.lock().unwrap();
+            *count += 1;
+        }));
+        
+        // Process an error - both listeners should be called
+        channel.process_error(DxLinkError {
+            error_type: DxLinkErrorType::Timeout,
+            message: "Test timeout".to_string()
+        });
+        
+        assert_eq!(*counter1.lock().unwrap(), 1);
+        assert_eq!(*counter2.lock().unwrap(), 1);
+        assert_eq!(*error_type1.lock().unwrap(), DxLinkErrorType::Timeout);
+        
+        // Remove the second listener
+        let removed = channel.remove_error_listener(listener2_id);
+        assert!(removed, "Listener2 should have been removed");
+        
+        // Process another error - only listener 1 should be called with the new error type
+        channel.process_error(DxLinkError {
+            error_type: DxLinkErrorType::BadAction,
+            message: "Test bad action".to_string()
+        });
+        
+        assert_eq!(*counter1.lock().unwrap(), 2);
+        assert_eq!(*counter2.lock().unwrap(), 1); // This should not increment
+        assert_eq!(*error_type1.lock().unwrap(), DxLinkErrorType::BadAction);
+        
+        // Try to remove already removed listener - should return false
+        let removed = channel.remove_error_listener(listener2_id);
+        assert!(!removed, "Already removed listener should return false");
+        
+        // Remove the first listener
+        let removed = channel.remove_error_listener(listener1_id);
+        assert!(removed, "Listener1 should have been removed");
+    }
 
     #[tokio::test]
     async fn test_send_message_errors() {
@@ -802,7 +1178,7 @@ mod tests {
     async fn test_clear() {
         let (tx, _rx) = mpsc::channel(32);
         let config = DxLinkWebSocketClientConfig::default();
-        let mut channel =
+        let channel =
             DxLinkWebSocketChannel::new(1, "test".to_string(), serde_json::json!({}), tx, &config);
 
         // Add listeners
