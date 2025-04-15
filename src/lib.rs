@@ -12,6 +12,7 @@ use wasm_bindgen::prelude::*;
 
 pub mod core;
 pub mod feed;
+pub mod dom;
 pub mod websocket_client;
 
 #[cfg(feature = "wasm")]
@@ -41,6 +42,10 @@ pub use crate::core::channel::{
 pub use crate::feed::{
     Feed, FeedAcceptConfig, FeedDataFormat, FeedEventFields, FeedOptions,
 };
+pub use crate::feed::messages::
+    {FeedSubscriptionEntry, FeedSetupMessage, FeedConfigMessage,
+    FeedSubscriptionMessage, FeedDataMessage, FeedData, FeedContract};
+pub use crate::dom::messages::{DomSetupMessage, DomConfigMessage, DomSnapshotMessage};
 pub use crate::websocket_client::{
     DxLinkWebSocketChannel, DxLinkWebSocketClientConfig, DxLinkLogLevel
 };

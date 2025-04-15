@@ -1,6 +1,6 @@
 //! Feed service module for real-time market data streaming.
 
-mod messages;
+pub mod messages;
 mod feed;
 
 pub use messages::*;

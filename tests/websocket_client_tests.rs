@@ -136,12 +136,12 @@ async fn test_authentication() {
 #[tokio::test]
 async fn test_feed_channel_request_and_close() {
     tracing::info!("Starting feed channel request and close test");
-    
+
     // Initialize logging for tests
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .try_init();
-        
+
     let config = DxLinkWebSocketClientConfig::default();
     let mut client = DxLinkWebSocketClient::new(config);
 
@@ -199,7 +199,7 @@ async fn test_feed_channel_request_and_close() {
         .expect("Timeout waiting for authorized state")
         .unwrap();
     assert_eq!(state, DxLinkAuthState::Authorized);
-    
+
     // Make sure we are in a good state before proceeding
     wait_for_states(&client).await;
     tracing::debug!("Client states verified, proceeding with channel open");
@@ -215,13 +215,13 @@ async fn test_feed_channel_request_and_close() {
     // The channel should already be open when we get it from open_channel()
     // So we can skip waiting for the CHANNEL_OPENED message and proceed directly
     tracing::info!("Channel is already open - channel_id: {}", channel.id);
-    
+
     // Let's manually create a CHANNEL_OPENED message for testing purposes
     let channel_id = channel.id; // Store channel id to avoid borrowing issues
 
     // Set up a listener for CHANNEL_CLOSED responses
     let (tx, mut rx) = mpsc::channel::<DxLinkChannelMessage>(32);
-    channel.add_message_listener(Box::new({
+    let _listener_id = channel.add_message_listener(Box::new({
         let tx = tx.clone();
         move |msg| {
             tracing::info!("Received channel message: {:?}", msg);
@@ -236,20 +236,20 @@ async fn test_feed_channel_request_and_close() {
     // Now close the channel - this sends a CHANNEL_CANCEL message
     // The server should respond with a CHANNEL_CLOSED message
     tracing::info!("Closing channel {}", channel_id);
-    
+
     // The close() method may return an error if the channel is already in Closed state
     if let Err(e) = channel.close().await {
         tracing::info!("Channel close result: {:?}", e);
     } else {
         tracing::info!("Sent CHANNEL_CANCEL successfully");
-        
+
         // Wait for the CHANNEL_CLOSED response from the server
         let wait_result = timeout(Duration::from_secs(3), rx.recv()).await;
         match wait_result {
             Ok(Some(msg)) => {
                 tracing::info!("Received message after channel close: {:?}", msg);
                 // The message type should be CHANNEL_CLOSED
-                assert_eq!(msg.message_type, "CHANNEL_CLOSED", 
+                assert_eq!(msg.message_type, "CHANNEL_CLOSED",
                           "Expected CHANNEL_CLOSED message but got {}", msg.message_type);
             },
             Ok(None) => {
@@ -257,7 +257,7 @@ async fn test_feed_channel_request_and_close() {
             },
             Err(_) => {
                 tracing::info!("Timeout waiting for CHANNEL_CLOSED");
-                // This is acceptable since the channel state listeners would handle 
+                // This is acceptable since the channel state listeners would handle
                 // the state change in a real application
             }
         }
@@ -265,7 +265,7 @@ async fn test_feed_channel_request_and_close() {
 
     // Wait a bit to ensure server has processed everything
     tokio::time::sleep(Duration::from_millis(500)).await;
-    
+
     // Clean up
     let _ = client.disconnect().await;
     tracing::debug!("Disconnected from server");
@@ -423,7 +423,7 @@ async fn test_feed_subscription() {
         ]))
     });
     tx.send(opened_msg).await.unwrap();
-    
+
     tracing::info!("Waiting for CHANNEL_OPENED message");
     timeout(Duration::from_secs(5), rx.recv())
         .await

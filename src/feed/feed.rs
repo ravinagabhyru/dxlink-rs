@@ -12,7 +12,8 @@ use super::messages::*;
 use crate::core::channel::{DxLinkChannelMessage, DxLinkChannelState};
 use crate::core::errors::{DxLinkError, DxLinkErrorType, Result};
 use crate::websocket_client::channel::DxLinkWebSocketChannel;
-use crate::websocket_client::DxLinkWebSocketClient; // Import the concrete channel
+use crate::websocket_client::DxLinkWebSocketClient;
+use crate::websocket_client::messages::Message;
 
 const FEED_SERVICE_NAME: &str = "FEED";
 const DEFAULT_BATCH_TIME: u64 = 100;
@@ -255,13 +256,19 @@ impl Feed {
 
     async fn send_subscription_update(&self) {
         let subs = self.subscriptions.lock().await;
+        // Convert from Value to FeedSubscriptionEntry if needed
+        let entries: Vec<FeedSubscriptionEntry> = subs
+            .values()
+            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+            .collect();
+            
         let msg = FeedSubscriptionMessage {
-            msg_type: "FEED_SUBSCRIPTION".into(),
+            message_type: "FEED_SUBSCRIPTION".into(),
             channel: self.channel.id,
-            add: if subs.is_empty() {
+            add: if entries.is_empty() {
                 None
             } else {
-                Some(subs.values().cloned().collect())
+                Some(entries)
             },
             remove: None,
             reset: Some(true),
@@ -269,7 +276,7 @@ impl Feed {
 
         let value = serde_json::to_value(&msg).unwrap();
         let channel_msg = DxLinkChannelMessage {
-            message_type: msg.msg_type,
+            message_type: msg.message_type().to_string(),
             payload: value,
         };
 
@@ -279,7 +286,7 @@ impl Feed {
     async fn send_accept_config(&self) {
         let config = self.accept_config.lock().await;
         let msg = FeedSetupMessage {
-            msg_type: "FEED_SETUP".into(),
+            message_type: "FEED_SETUP".into(),
             channel: self.channel.id,
             accept_aggregation_period: config.accept_aggregation_period,
             accept_data_format: config.accept_data_format,
@@ -288,11 +295,11 @@ impl Feed {
 
         let value = serde_json::to_value(&msg).unwrap();
         let channel_msg = DxLinkChannelMessage {
-            message_type: msg.msg_type,
+            message_type: msg.message_type().to_string(),
             payload: value,
         };
 
-        let _ =self.channel.send(channel_msg).await;
+        let _ = self.channel.send(channel_msg).await;
     }
 }
 
