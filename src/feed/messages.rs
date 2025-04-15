@@ -157,13 +157,15 @@ impl Message for FeedSubscriptionMessage {
     }
 }
 
+use crate::feed::events::FeedEvent;
+
 /// Feed data in either full or compact format
 #[derive(Debug, Clone)]
 pub enum FeedData {
-    /// Full format data (array of JSON objects)
-    Full(Vec<Value>),
-    /// Compact format data (array starting with a string event type followed by array of values)
-    Compact(Vec<Value>),
+    /// Full format data (array of JSON objects with named fields)
+    Full(Vec<FeedEvent>),
+    /// Compact format data (array of pairs: event type string followed by array of values)
+    Compact(Vec<(String, Vec<Value>)>),
 }
 
 impl Serialize for FeedData {
@@ -172,8 +174,19 @@ impl Serialize for FeedData {
         S: serde::Serializer,
     {
         match self {
-            FeedData::Full(events) => events.serialize(serializer),
-            FeedData::Compact(events) => events.serialize(serializer),
+            FeedData::Full(events) => {
+                // Serialize as an array of FeedEvent objects
+                events.serialize(serializer)
+            },
+            FeedData::Compact(events) => {
+                // Serialize as a flat array with alternating string type and value array
+                let mut flat_array: Vec<Value> = Vec::new();
+                for (event_type, values) in events {
+                    flat_array.push(Value::String(event_type.clone()));
+                    flat_array.push(Value::Array(values.clone()));
+                }
+                flat_array.serialize(serializer)
+            },
         }
     }
 }
@@ -183,19 +196,48 @@ impl<'de> Deserialize<'de> for FeedData {
     where
         D: serde::Deserializer<'de>,
     {
-        let data: Vec<Value> = Vec::deserialize(deserializer)?;
-        
-        // If empty, treat as full format
-        if data.is_empty() {
-            return Ok(FeedData::Full(data));
+        // First deserialize as a generic Value to determine format
+        let data: Value = Value::deserialize(deserializer)?;
+
+        if !data.is_array() {
+            return Err(serde::de::Error::custom("Expected array for FeedData"));
         }
-        
-        // If first element is a string, and second element is an array, it's compact format
-        if data.len() >= 2 && data[0].is_string() && data[1].is_array() {
-            Ok(FeedData::Compact(data))
+
+        let array = data.as_array().unwrap();
+
+        // If empty, treat as full format (empty events list)
+        if array.is_empty() {
+            return Ok(FeedData::Full(Vec::new()));
+        }
+
+        // Check for compact format: first item is a string, second is an array
+        if array.len() >= 2 && array[0].is_string() && array[1].is_array() {
+            // This is compact format
+            let mut compact_events = Vec::new();
+
+            // Process pairs of items (event_type string followed by values array)
+            let mut i = 0;
+            while i < array.len() - 1 {
+                if array[i].is_string() && array[i+1].is_array() {
+                    let event_type = array[i].as_str().unwrap().to_string();
+                    let values = array[i+1].as_array().unwrap().clone();
+                    compact_events.push((event_type, values));
+                    i += 2;
+                } else {
+                    // Skip invalid entries
+                    i += 1;
+                }
+            }
+
+            Ok(FeedData::Compact(compact_events))
         } else {
-            // Otherwise it's full format (array of objects)
-            Ok(FeedData::Full(data))
+            // Try to deserialize as Full format (array of FeedEvent objects)
+            match serde_json::from_value::<Vec<FeedEvent>>(data.clone()) {
+                Ok(events) => Ok(FeedData::Full(events)),
+                Err(err) => Err(serde::de::Error::custom(format!(
+                    "Could not deserialize as either FULL or COMPACT format: {}", err
+                ))),
+            }
         }
     }
 }
@@ -209,6 +251,59 @@ impl FeedData {
     /// Check if data is in compact format
     pub fn is_compact(&self) -> bool {
         matches!(self, FeedData::Compact(_))
+    }
+
+    /// Convert compact format to full format using event fields configuration
+    pub fn compact_to_full(&self, event_fields: &FeedEventFields) -> Result<Vec<FeedEvent>, DxLinkError> {
+        match self {
+            FeedData::Full(events) => Ok(events.clone()),
+            FeedData::Compact(compact_data) => {
+                let mut full_events = Vec::new();
+
+                for (event_type, values) in compact_data {
+                    // Get field names for this event type
+                    let field_names = match event_fields.get(event_type) {
+                        Some(fields) => fields,
+                        None => return Err(DxLinkError {
+                            error_type: DxLinkErrorType::InvalidMessage,
+                            message: format!("No field configuration for event type: {}", event_type),
+                        }),
+                    };
+
+                    if values.len() > field_names.len() {
+                        return Err(DxLinkError {
+                            error_type: DxLinkErrorType::InvalidMessage,
+                            message: format!(
+                                "Too many values for event type {}: expected {}, got {}",
+                                event_type, field_names.len(), values.len()
+                            ),
+                        });
+                    }
+
+                    // Construct JSON object with field names and values
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("eventType".to_string(), Value::String(event_type.clone()));
+
+                    for (i, value) in values.iter().enumerate() {
+                        if i < field_names.len() {
+                            obj.insert(field_names[i].clone(), value.clone());
+                        }
+                    }
+
+                    // Deserialize as FeedEvent
+                    let event_value = Value::Object(obj);
+                    match serde_json::from_value::<FeedEvent>(event_value) {
+                        Ok(event) => full_events.push(event),
+                        Err(err) => return Err(DxLinkError {
+                            error_type: DxLinkErrorType::InvalidMessage,
+                            message: format!("Failed to deserialize event: {}", err),
+                        }),
+                    }
+                }
+
+                Ok(full_events)
+            }
+        }
     }
 }
 
@@ -291,6 +386,7 @@ pub type FeedCompactEventData = (String, Vec<FeedEventValue>);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feed::JSONDouble;
 
     #[test]
     fn test_feed_contract_serialization() {
@@ -340,7 +436,7 @@ mod tests {
         assert!(json.contains("\"type\":\"Quote\""));
         assert!(json.contains("\"symbol\":\"AAPL\""));
     }
-    
+
     #[test]
     fn test_feed_data_full_message_deserialization() {
         let json = r#"{
@@ -361,16 +457,21 @@ mod tests {
         let msg: FeedDataMessage = serde_json::from_str(json).unwrap();
         assert_eq!(msg.message_type, "FEED_DATA");
         assert_eq!(msg.channel, 1);
-        
+
         // Check if data is in full format (not compact)
         assert!(msg.data.is_full());
-        
+
         if let FeedData::Full(events) = &msg.data {
             assert_eq!(events.len(), 1);
-            let event = &events[0];
-            assert_eq!(event["eventSymbol"], "AAPL");
-            assert_eq!(event["eventType"], "Quote");
-            assert_eq!(event["bidPrice"], 123.45);
+            if let FeedEvent::Quote(quote) = &events[0] {
+                assert_eq!(quote.event_symbol, "AAPL");
+                assert!(matches!(quote.bid_price, Some(JSONDouble::Number(n)) if n == 123.45));
+                assert!(matches!(quote.ask_price, Some(JSONDouble::Number(n)) if n == 123.46));
+                assert!(matches!(quote.bid_size, Some(JSONDouble::Number(n)) if n == 100.0));
+                assert!(matches!(quote.ask_size, Some(JSONDouble::Number(n)) if n == 200.0));
+            } else {
+                panic!("Expected Quote event");
+            }
         } else {
             panic!("Expected Full data format");
         }
@@ -390,18 +491,125 @@ mod tests {
         let msg: FeedDataMessage = serde_json::from_str(json).unwrap();
         assert_eq!(msg.message_type, "FEED_DATA");
         assert_eq!(msg.channel, 1);
-        
+
         assert!(msg.data.is_compact());
-        
+
         if let FeedData::Compact(data) = &msg.data {
-            assert_eq!(data.len(), 2);
-            assert_eq!(data[0], "Quote");
-            assert!(data[1].is_array());
-            let values = data[1].as_array().unwrap();
+            assert_eq!(data.len(), 1); // Now we have 1 pair of (event_type, values)
+            let (event_type, values) = &data[0];
+            assert_eq!(event_type, "Quote");
             assert_eq!(values.len(), 6);
             assert_eq!(values[0], "AAPL");
         } else {
             panic!("Expected Compact data format");
+        }
+    }
+
+    #[test]
+    fn test_compact_to_full_conversion() {
+        // Create a compact data format
+        let compact_data = FeedData::Compact(vec![
+            ("Quote".to_string(), vec![
+                Value::String("AAPL".to_string()),
+                Value::String("Quote".to_string()),
+                Value::Number(serde_json::Number::from_f64(145.67).unwrap()),
+                Value::Number(serde_json::Number::from_f64(145.68).unwrap()),
+                Value::Number(serde_json::Number::from_f64(100.0).unwrap()),
+                Value::Number(serde_json::Number::from_f64(200.0).unwrap()),
+            ])
+        ]);
+
+        // Create field configuration
+        let mut event_fields = FeedEventFields::new();
+        event_fields.insert("Quote".to_string(), vec![
+            "eventSymbol".to_string(),
+            "eventType".to_string(),
+            "bidPrice".to_string(),
+            "askPrice".to_string(),
+            "bidSize".to_string(),
+            "askSize".to_string(),
+        ]);
+
+        // Convert compact to full
+        let full_events = compact_data.compact_to_full(&event_fields).unwrap();
+
+        // Verify conversion
+        assert_eq!(full_events.len(), 1);
+
+        if let FeedEvent::Quote(quote) = &full_events[0] {
+            assert_eq!(quote.event_symbol, "AAPL");
+            assert!(matches!(quote.bid_price, Some(JSONDouble::Number(n)) if n == 145.67));
+            assert!(matches!(quote.ask_price, Some(JSONDouble::Number(n)) if n == 145.68));
+            assert!(matches!(quote.bid_size, Some(JSONDouble::Number(n)) if n == 100.0));
+            assert!(matches!(quote.ask_size, Some(JSONDouble::Number(n)) if n == 200.0));
+        } else {
+            panic!("Expected Quote event");
+        }
+    }
+
+    #[test]
+    fn test_special_json_double_values() {
+        // Test with special values in full format
+        let json = r#"{
+            "type": "FEED_DATA",
+            "channel": 1,
+            "data": [
+                {
+                    "eventSymbol": "AAPL",
+                    "eventType": "Quote",
+                    "bidPrice": "NaN",
+                    "askPrice": "Infinity",
+                    "bidSize": "-Infinity"
+                }
+            ]
+        }"#;
+
+        let msg: FeedDataMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.message_type, "FEED_DATA");
+
+        if let FeedData::Full(events) = &msg.data {
+            if let FeedEvent::Quote(quote) = &events[0] {
+                assert_eq!(quote.event_symbol, "AAPL");
+                assert!(matches!(quote.bid_price, Some(JSONDouble::NaN)));
+                assert!(matches!(quote.ask_price, Some(JSONDouble::Infinity)));
+                assert!(matches!(quote.bid_size, Some(JSONDouble::NegInfinity)));
+            } else {
+                panic!("Expected Quote event");
+            }
+        } else {
+            panic!("Expected Full data format");
+        }
+
+        // Test with special values in compact format and conversion
+        let mut event_fields = FeedEventFields::new();
+        event_fields.insert("Quote".to_string(), vec![
+            "eventSymbol".to_string(),
+            "eventType".to_string(),
+            "bidPrice".to_string(),
+            "askPrice".to_string(),
+            "bidSize".to_string(),
+        ]);
+
+        let compact_data = FeedData::Compact(vec![
+            ("Quote".to_string(), vec![
+                Value::String("AAPL".to_string()),
+                Value::String("Quote".to_string()),
+                Value::String("NaN".to_string()),
+                Value::String("Infinity".to_string()),
+                Value::String("-Infinity".to_string()),
+            ])
+        ]);
+
+        let full_events = compact_data.compact_to_full(&event_fields).unwrap();
+        assert_eq!(full_events.len(), 1);
+
+        if let FeedEvent::Quote(quote) = &full_events[0] {
+            assert_eq!(quote.event_symbol, "AAPL");
+            assert!(matches!(quote.bid_price, Some(JSONDouble::NaN)));
+            assert!(matches!(quote.ask_price, Some(JSONDouble::Infinity)));
+            assert!(matches!(quote.bid_size, Some(JSONDouble::NegInfinity)));
+        } else {
+            panic!("Expected Quote event");
         }
     }
 }

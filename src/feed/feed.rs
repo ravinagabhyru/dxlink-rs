@@ -5,9 +5,11 @@ use serde_json::Value;
 /// configuration, and message handling through DXLink channels.
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, broadcast};
 use tracing;
+use uuid::Uuid;
 
+use super::events::FeedEvent as FeedDataEvent;
 use super::messages::*;
 use crate::core::channel::{DxLinkChannelMessage, DxLinkChannelState};
 use crate::core::errors::{DxLinkError, DxLinkErrorType, Result};
@@ -60,6 +62,7 @@ pub struct FeedAcceptConfig {
 }
 
 /// Feed service that manages subscriptions and data flow
+#[allow(unused)]
 pub struct Feed {
     /// The underlying channel
     channel: Arc<DxLinkWebSocketChannel>, // Use the concrete type
@@ -77,6 +80,10 @@ pub struct Feed {
     event_tx: mpsc::Sender<FeedEvent>,
     /// Event receiver for subscription changes
     event_rx: mpsc::Receiver<FeedEvent>,
+    /// Sender for feed data events
+    data_tx: broadcast::Sender<crate::feed::events::FeedEvent>,
+    /// Receiver for feed data events
+    data_rx: broadcast::Receiver<crate::feed::events::FeedEvent>,
 }
 
 #[derive(Debug)]
@@ -87,6 +94,7 @@ enum FeedEvent {
     Configure(FeedAcceptConfig),
 }
 
+#[allow(unused)]
 impl Feed {
     /// Create a new feed service instance
     pub async fn new(
@@ -95,6 +103,7 @@ impl Feed {
         options: Option<FeedOptions>,
     ) -> Result<Self> {
         let (event_tx, event_rx) = mpsc::channel(32);
+        let (data_tx, data_rx) = broadcast::channel(100); // Channel for feed data events
         let options = options.unwrap_or_default();
 
         let channel = client.lock().await.open_channel(
@@ -103,15 +112,86 @@ impl Feed {
                 )
                 .await ;
 
+        // Setup message listeners
+        let config_clone = Arc::new(Mutex::new(FeedConfig::default()));
+        let config_ref = config_clone.clone();
+        let data_tx_clone = data_tx.clone();
+
+        // Channel message listener - reads message type from DxLinkChannelMessage
+        channel.add_message_listener(Box::new(move |message| {
+            // In the websocket client, message is a DxLinkChannelMessage
+            // Extract type and payload from it
+            if let Ok(value) = serde_json::from_value::<serde_json::Value>(message.payload.clone()) {
+                if let Some(type_value) = value.get("type") {
+                    if let Some(type_str) = type_value.as_str() {
+                        if type_str == "FEED_CONFIG" {
+                            // Parse the message payload as FeedConfigMessage
+                            if let Ok(feed_config) = serde_json::from_value::<FeedConfigMessage>(message.payload.clone()) {
+                                tokio::spawn({
+                                    let config_ref = config_ref.clone();
+                                    async move {
+                                        let new_config = FeedConfig {
+                                            aggregation_period: feed_config.aggregation_period,
+                                            data_format: feed_config.data_format,
+                                            event_fields: feed_config.event_fields.clone(),
+                                        };
+                                        *config_ref.lock().await = new_config;
+                                    }
+                                });
+                            }
+                        } else if type_str == "FEED_DATA" {
+                            // Parse the message payload as FeedDataMessage
+                            if let Ok(feed_data) = serde_json::from_value::<FeedDataMessage>(message.payload.clone()) {
+                                tokio::spawn({
+                                    let data_tx = data_tx_clone.clone();
+                                    let config_ref = config_ref.clone();
+                                    async move {
+                                        let config = config_ref.lock().await.clone();
+                                        match &feed_data.data {
+                                            FeedData::Full(events) => {
+                                                // Forward each event to listeners
+                                                for event in events {
+                                                    let _ = data_tx.send(event.clone());
+                                                }
+                                            },
+                                            FeedData::Compact(_data) => {
+                                                // Process compact data if we have event fields configuration
+                                                if let Some(ref fields) = config.event_fields {
+                                                    match feed_data.data.compact_to_full(fields) {
+                                                        Ok(events) => {
+                                                            for event in events {
+                                                                let _ = data_tx.send(event);
+                                                            }
+                                                        },
+                                                        Err(e) => {
+                                                            tracing::error!("Failed to convert compact data to full format: {}", e);
+                                                        }
+                                                    }
+                                                } else {
+                                                    tracing::error!("Received compact data but no event fields configuration available");
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+
         let feed = Self {
             channel,
             accept_config: Arc::new(Mutex::new(FeedAcceptConfig::default())),
-            config: Arc::new(Mutex::new(FeedConfig::default())),
+            config: config_clone,
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             touched_events: Arc::new(Mutex::new(HashSet::new())),
             options,
             event_tx,
             event_rx,
+            data_tx,
+            data_rx,
         };
 
         // Start event processing loop
@@ -163,6 +243,30 @@ impl Feed {
         let _ = self.channel.close().await;
     }
 
+    /// Add a listener for feed data events
+    ///
+    /// Returns a UUID that can be used to remove the listener
+    pub fn add_data_listener<F>(&self, listener: F) -> Uuid
+    where
+        F: Fn(FeedDataEvent) + Send + Sync + 'static,
+    {
+        let listener_id = Uuid::new_v4();
+        let mut rx = self.data_tx.subscribe();
+
+        tokio::spawn(async move {
+            while let Ok(event) = rx.recv().await {
+                listener(event);
+            }
+        });
+
+        listener_id
+    }
+
+    /// Register for specific types of feed events
+    pub fn subscribe_to_data_events(&self) -> broadcast::Receiver<FeedDataEvent> {
+        self.data_tx.subscribe()
+    }
+
     // Private implementation details
 
     fn start_event_loop(&self) {
@@ -200,14 +304,20 @@ impl Feed {
         }
 
         let mut subs = self.subscriptions.lock().await;
+        // Track which subscriptions were added
+        let mut added = Vec::new();
         for sub in subscriptions {
             if let Some(key) = self.subscription_key(&sub) {
-                subs.insert(key, sub);
+                subs.insert(key, sub.clone());
+                added.push(sub);
             }
         }
         drop(subs); // Release the lock before async call
 
-        self.send_subscription_update().await;
+        // Send only the added subscriptions without reset flag
+        if !added.is_empty() {
+            self.send_subscription_add(added).await;
+        }
     }
 
     async fn handle_unsubscribe(&self, subscriptions: Vec<Value>) {
@@ -216,14 +326,21 @@ impl Feed {
         }
 
         let mut subs = self.subscriptions.lock().await;
+        // Track which subscriptions were removed
+        let mut removed = Vec::new();
         for sub in subscriptions {
             if let Some(key) = self.subscription_key(&sub) {
-                subs.remove(&key);
+                if subs.remove(&key).is_some() {
+                    removed.push(sub);
+                }
             }
         }
         drop(subs); // Release the lock before async call
 
-        self.send_subscription_update().await;
+        // Send only the removed subscriptions without reset flag
+        if !removed.is_empty() {
+            self.send_subscription_remove(removed).await;
+        }
     }
 
     async fn handle_reset(&self) {
@@ -232,7 +349,7 @@ impl Feed {
         }
 
         self.subscriptions.lock().await.clear();
-        self.send_subscription_update().await;
+        self.send_subscription_reset().await;
     }
 
     async fn handle_configure(&self, config: FeedAcceptConfig) {
@@ -254,6 +371,95 @@ impl Feed {
         })
     }
 
+    async fn send_subscription_add(&self, subscriptions: Vec<Value>) {
+        if subscriptions.is_empty() {
+            return;
+        }
+
+        // Convert from Value to FeedSubscriptionEntry if needed
+        let entries: Vec<FeedSubscriptionEntry> = subscriptions
+            .iter()
+            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+            .collect();
+
+        if entries.is_empty() {
+            return;
+        }
+
+        let msg = FeedSubscriptionMessage {
+            message_type: "FEED_SUBSCRIPTION".into(),
+            channel: self.channel.id,
+            add: Some(entries),
+            remove: None,
+            reset: None,
+        };
+
+        // Convert to DxLinkChannelMessage format expected by channel.send
+        let channel_msg = DxLinkChannelMessage {
+            message_type: msg.message_type().to_string(),
+            payload: serde_json::to_value(&msg).unwrap(),
+        };
+
+        if let Err(e) = self.channel.send(channel_msg).await {
+            tracing::error!("Failed to send subscription add: {}", e);
+        }
+    }
+
+    async fn send_subscription_remove(&self, subscriptions: Vec<Value>) {
+        if subscriptions.is_empty() {
+            return;
+        }
+
+        // Convert from Value to FeedSubscriptionEntry if needed
+        let entries: Vec<FeedSubscriptionEntry> = subscriptions
+            .iter()
+            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+            .collect();
+
+        if entries.is_empty() {
+            return;
+        }
+
+        let msg = FeedSubscriptionMessage {
+            message_type: "FEED_SUBSCRIPTION".into(),
+            channel: self.channel.id,
+            add: None,
+            remove: Some(entries),
+            reset: None,
+        };
+
+        // Convert to DxLinkChannelMessage format expected by channel.send
+        let channel_msg = DxLinkChannelMessage {
+            message_type: msg.message_type().to_string(),
+            payload: serde_json::to_value(&msg).unwrap(),
+        };
+
+        if let Err(e) = self.channel.send(channel_msg).await {
+            tracing::error!("Failed to send subscription remove: {}", e);
+        }
+    }
+
+    async fn send_subscription_reset(&self) {
+        let msg = FeedSubscriptionMessage {
+            message_type: "FEED_SUBSCRIPTION".into(),
+            channel: self.channel.id,
+            add: None,
+            remove: None,
+            reset: Some(true),
+        };
+
+        // Convert to DxLinkChannelMessage format expected by channel.send
+        let channel_msg = DxLinkChannelMessage {
+            message_type: msg.message_type().to_string(),
+            payload: serde_json::to_value(&msg).unwrap(),
+        };
+
+        if let Err(e) = self.channel.send(channel_msg).await {
+            tracing::error!("Failed to send subscription reset: {}", e);
+        }
+    }
+
+    // Legacy method for backward compatibility
     async fn send_subscription_update(&self) {
         let subs = self.subscriptions.lock().await;
         // Convert from Value to FeedSubscriptionEntry if needed
@@ -261,7 +467,7 @@ impl Feed {
             .values()
             .filter_map(|v| serde_json::from_value(v.clone()).ok())
             .collect();
-            
+
         let msg = FeedSubscriptionMessage {
             message_type: "FEED_SUBSCRIPTION".into(),
             channel: self.channel.id,
@@ -274,13 +480,15 @@ impl Feed {
             reset: Some(true),
         };
 
-        let value = serde_json::to_value(&msg).unwrap();
+        // Convert to DxLinkChannelMessage format expected by channel.send
         let channel_msg = DxLinkChannelMessage {
             message_type: msg.message_type().to_string(),
-            payload: value,
+            payload: serde_json::to_value(&msg).unwrap(),
         };
 
-        let _ = self.channel.send(channel_msg).await;
+        if let Err(e) = self.channel.send(channel_msg).await {
+            tracing::error!("Failed to send subscription update: {}", e);
+        }
     }
 
     async fn send_accept_config(&self) {
@@ -293,19 +501,22 @@ impl Feed {
             accept_event_fields: config.accept_event_fields.clone(),
         };
 
-        let value = serde_json::to_value(&msg).unwrap();
+        // Convert to DxLinkChannelMessage format expected by channel.send
         let channel_msg = DxLinkChannelMessage {
             message_type: msg.message_type().to_string(),
-            payload: value,
+            payload: serde_json::to_value(&msg).unwrap(),
         };
 
-        let _ = self.channel.send(channel_msg).await;
+        if let Err(e) = self.channel.send(channel_msg).await {
+            tracing::error!("Failed to send accept config: {}", e);
+        }
     }
 }
 
 impl Clone for Feed {
     fn clone(&self) -> Self {
         let (tx, rx) = mpsc::channel(32);
+        let (data_tx, data_rx) = broadcast::channel(100);
         Self {
             channel: self.channel.clone(),
             accept_config: self.accept_config.clone(),
@@ -315,6 +526,8 @@ impl Clone for Feed {
             options: self.options.clone(),
             event_tx: tx,
             event_rx: rx,
+            data_tx,
+            data_rx
         }
     }
 }
@@ -338,6 +551,7 @@ mod tests {
     #[test]
     fn test_subscription_key() {
         let (tx, _rx) = mpsc::channel(32);
+        let (data_tx, data_rx) = broadcast::channel(100);
         let feed = Feed {
             channel: Arc::new(DxLinkWebSocketChannel::new(
                 0,
@@ -353,6 +567,8 @@ mod tests {
             options: FeedOptions::default(),
             event_tx: tokio::sync::mpsc::channel(32).0,
             event_rx: tokio::sync::mpsc::channel(32).1,
+            data_tx,
+            data_rx,
         };
 
         let sub1 = json!({ "type": "Quote", "symbol": "AAPL" });
@@ -373,6 +589,7 @@ mod tests {
     async fn test_handle_configure_internal() {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (tx, _rx) = mpsc::channel(32);
+        let (data_tx, data_rx) = broadcast::channel(100);
         let feed = Feed {
             channel: Arc::new(DxLinkWebSocketChannel::new(
                 0,
@@ -388,6 +605,8 @@ mod tests {
             options: FeedOptions::default(),
             event_tx,
             event_rx,
+            data_tx,
+            data_rx,
         };
 
         let new_config = FeedAcceptConfig {
@@ -416,6 +635,7 @@ mod tests {
             event_fields: None,
         };
         let (tx, _rx) = mpsc::channel(32);
+        let (data_tx, data_rx) = broadcast::channel(100);
         let feed = Feed {
             channel: Arc::new(DxLinkWebSocketChannel::new(
                 0,
@@ -431,6 +651,8 @@ mod tests {
             options: FeedOptions::default(),
             event_tx,
             event_rx,
+            data_tx,
+            data_rx
         };
         let returned_config = feed.config().await;
         assert_eq!(returned_config.aggregation_period, 42);
@@ -441,6 +663,7 @@ mod tests {
     async fn test_add_remove_clear_subscriptions_events() {
         let (event_tx, _event_rx) = mpsc::channel(32);
         let (tx, _rx) = mpsc::channel(32);
+        let (data_tx, data_rx) = broadcast::channel(100);
         let feed = Feed {
             channel: Arc::new(DxLinkWebSocketChannel::new(
                 0,
@@ -456,6 +679,8 @@ mod tests {
             options: FeedOptions::default(),
             event_tx: event_tx.clone(),
             event_rx: tokio::sync::mpsc::channel(32).1, // Don't use the real receiver
+            data_tx,
+            data_rx
         };
 
         let sub1 = json!({ "type": "Quote", "symbol": "AAPL" });
