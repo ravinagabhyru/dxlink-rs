@@ -385,10 +385,20 @@ impl DxLinkWebSocketClient {
                 }
                 "ERROR" => {
                     if let Some(error_msg) = message.as_any().downcast_ref::<ErrorMessage>() {
-                        debug!("Received error message: {}", error_msg.message);
+                        debug!("Received error message: {} of type {:?}", error_msg.message, error_msg.error);
+                        
+                        // Create a more detailed error message that includes the channel information
+                        let detailed_message = if error_msg.channel == 0 {
+                            // Connection-level error
+                            format!("Connection error: {}", error_msg.message)
+                        } else {
+                            // Channel-specific error
+                            format!("Channel {} error: {}", error_msg.channel, error_msg.message)
+                        };
+                        
                         self.publish_error(DxLinkError::new(
-                            DxLinkErrorType::Unknown,
-                            error_msg.message.clone(),
+                            error_msg.error,
+                            detailed_message,
                         ));
                     }
                 }
@@ -404,10 +414,20 @@ impl DxLinkWebSocketClient {
                 if let Some(channel) = self.channels.get(&channel_id) {
                     if message.message_type() == "ERROR" {
                         if let Some(error_msg) = message.as_any().downcast_ref::<ErrorMessage>() {
-                            debug!("Received error message: {}", error_msg.message);
+                            debug!("Received error message for channel {}: {} of type {:?}", 
+                                channel_id, error_msg.message, error_msg.error);
+                            
+                            // Create a detailed message for the channel error
+                            let detailed_message = format!(
+                                "Channel {} error ({}): {}", 
+                                channel_id,
+                                channel.service,
+                                error_msg.message
+                            );
+                            
                             self.publish_error(DxLinkError::new(
-                                DxLinkErrorType::Unknown,
-                                error_msg.message.clone(),
+                                error_msg.error,
+                                detailed_message,
                             ));
                         }
                     } else if is_channel_lifecycle_message(&message) {

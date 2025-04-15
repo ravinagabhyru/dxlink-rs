@@ -4,6 +4,9 @@ pub mod channel;
 pub mod connector;
 pub mod client;
 
+#[cfg(test)]
+mod tests;
+
 pub use config::{DxLinkWebSocketClientConfig, DxLinkLogLevel};
 pub use connector::WebSocketConnector;
 pub use crate::DxLinkChannelMessage;

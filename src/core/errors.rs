@@ -134,6 +134,7 @@ impl From<ChannelError> for DxLinkError {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use serde_json::json;
 
     #[test]
     fn test_error_creation() {
@@ -180,5 +181,141 @@ mod tests {
 
         listener(&error);
         assert!(called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_error_type_deserialization() {
+        // Test all possible error types from JSON
+        let json_values = [
+            (json!("timeout"), DxLinkErrorType::Timeout),
+            (json!("unsupported_protocol"), DxLinkErrorType::UnsupportedProtocol),
+            (json!("unauthorized"), DxLinkErrorType::Unauthorized),
+            (json!("invalid_message"), DxLinkErrorType::InvalidMessage),
+            (json!("bad_action"), DxLinkErrorType::BadAction),
+            (json!("unknown"), DxLinkErrorType::Unknown),
+        ];
+
+        for (json_value, expected_type) in json_values {
+            let error_type: DxLinkErrorType = serde_json::from_value(json_value).unwrap();
+            assert_eq!(error_type, expected_type);
+        }
+    }
+
+    #[test]
+    fn test_error_message_parsing() {
+        use crate::websocket_client::messages::ErrorMessage;
+
+        // Test parsing an ERROR message with every possible error type
+        let error_types = [
+            ("timeout", DxLinkErrorType::Timeout),
+            ("unsupported_protocol", DxLinkErrorType::UnsupportedProtocol),
+            ("unauthorized", DxLinkErrorType::Unauthorized),
+            ("invalid_message", DxLinkErrorType::InvalidMessage),
+            ("bad_action", DxLinkErrorType::BadAction),
+            ("unknown", DxLinkErrorType::Unknown),
+        ];
+
+        for (error_str, expected_type) in error_types {
+            let json = format!(r#"{{
+                "type": "ERROR",
+                "channel": 0,
+                "error": "{}",
+                "message": "Error description"
+            }}"#, error_str);
+
+            let msg: ErrorMessage = serde_json::from_str(&json).unwrap();
+            assert_eq!(msg.message_type, "ERROR");
+            assert_eq!(msg.channel, 0);
+            assert_eq!(msg.error, expected_type);
+            assert_eq!(msg.message, "Error description");
+        }
+    }
+    
+    #[test]
+    fn test_detailed_error_message_parsing() {
+        use crate::websocket_client::messages::ErrorMessage;
+        
+        // Test parsing ERROR messages with different channel IDs and error types
+        let test_cases = [
+            // Connection-level errors (channel 0)
+            (0, "timeout", "Connection timed out", DxLinkErrorType::Timeout),
+            (0, "unsupported_protocol", "Protocol version not supported", DxLinkErrorType::UnsupportedProtocol),
+            (0, "unauthorized", "Authentication failed", DxLinkErrorType::Unauthorized),
+            
+            // Channel-specific errors
+            (1, "invalid_message", "Invalid subscription format", DxLinkErrorType::InvalidMessage),
+            (2, "bad_action", "Cannot subscribe while channel is closing", DxLinkErrorType::BadAction),
+            (5, "timeout", "Operation timed out", DxLinkErrorType::Timeout),
+        ];
+        
+        for (channel, error_type, message, expected_type) in test_cases {
+            let json = format!(r#"{{
+                "type": "ERROR",
+                "channel": {},
+                "error": "{}",
+                "message": "{}"
+            }}"#, channel, error_type, message);
+            
+            let msg: ErrorMessage = serde_json::from_str(&json).unwrap();
+            assert_eq!(msg.message_type, "ERROR");
+            assert_eq!(msg.channel, channel);
+            assert_eq!(msg.error, expected_type);
+            assert_eq!(msg.message, message);
+            
+            // Verify the error can be converted to a DxLinkError
+            let error = DxLinkError::new(msg.error, msg.message.clone());
+            assert_eq!(error.error_type, expected_type);
+            assert_eq!(error.message, message);
+        }
+    }
+
+    #[test]
+    fn test_channel_error_conversion() {
+        use crate::core::channel::DxLinkChannelState;
+
+        // Test converting ChannelError to DxLinkError
+        let channel_errors = [
+            (
+                ChannelError::InvalidStateTransition {
+                    from: DxLinkChannelState::Requested,
+                    to: DxLinkChannelState::Closed,
+                },
+                DxLinkErrorType::BadAction,
+            ),
+            (
+                ChannelError::NotReady {
+                    state: DxLinkChannelState::Requested,
+                },
+                DxLinkErrorType::BadAction,
+            ),
+            (
+                ChannelError::UnsupportedMessageType {
+                    message_type: "UNKNOWN".to_string(),
+                    supported: "FEED_SETUP, FEED_SUBSCRIPTION".to_string(),
+                },
+                DxLinkErrorType::InvalidMessage,
+            ),
+            (
+                ChannelError::InvalidPayload("Invalid JSON".to_string()),
+                DxLinkErrorType::InvalidMessage,
+            ),
+            (
+                ChannelError::SendError("Failed to send message".to_string()),
+                DxLinkErrorType::Unknown,
+            ),
+            (
+                ChannelError::Timeout { timeout_secs: 30 },
+                DxLinkErrorType::Timeout,
+            ),
+            (
+                ChannelError::Closed,
+                DxLinkErrorType::BadAction,
+            ),
+        ];
+
+        for (channel_error, expected_type) in channel_errors {
+            let dxlink_error: DxLinkError = channel_error.into();
+            assert_eq!(dxlink_error.error_type, expected_type);
+        }
     }
 }
