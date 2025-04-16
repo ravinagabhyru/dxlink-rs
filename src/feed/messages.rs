@@ -77,7 +77,7 @@ pub struct FeedSetupMessage {
     pub message_type: String,
     pub channel: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub accept_aggregation_period: Option<u32>,
+    pub accept_aggregation_period: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accept_data_format: Option<FeedDataFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -106,7 +106,7 @@ pub struct FeedConfigMessage {
     pub message_type: String,
     pub channel: u64,
     #[serde(rename = "aggregationPeriod")]
-    pub aggregation_period: u32,
+    pub aggregation_period: f64,
     #[serde(rename = "dataFormat")]
     pub data_format: FeedDataFormat,
     #[serde(rename = "eventFields", skip_serializing_if = "Option::is_none")]

@@ -15,14 +15,13 @@ use crate::core::{
     errors::{DxLinkError, DxLinkErrorType, ErrorListener},
 };
 
-use crate::websocket_client::ChannelRequestMessage;
 use crate::websocket_client::{
     channel::DxLinkWebSocketChannel,
     config::DxLinkWebSocketClientConfig,
     connector::WebSocketConnector,
     messages::{
-        util::{is_channel_lifecycle_message, is_channel_message, is_connection_message},
-        AuthMessage, ErrorMessage, KeepaliveMessage, Message, MessageType, SetupMessage,
+        AuthMessage, ChannelRequestMessage, ErrorMessage, 
+        Message, MessageType, SetupMessage,
     },
 };
 
@@ -37,7 +36,7 @@ pub struct DxLinkWebSocketClient {
     connection_state: Arc<Mutex<DxLinkConnectionState>>,
     auth_state: Arc<Mutex<DxLinkAuthState>>,
     last_auth_token: Arc<Mutex<Option<String>>>,
-    channels: HashMap<u64, Arc<DxLinkWebSocketChannel>>,
+    channels: Arc<Mutex<HashMap<u64, Arc<DxLinkWebSocketChannel>>>>,
     next_channel_id: Arc<Mutex<u64>>,
     reconnect_attempts: Arc<Mutex<u32>>,
     last_received: Arc<Mutex<u64>>,
@@ -58,7 +57,7 @@ impl DxLinkWebSocketClient {
             connection_state: Arc::new(Mutex::new(DxLinkConnectionState::NotConnected)),
             auth_state: Arc::new(Mutex::new(DxLinkAuthState::Unauthorized)),
             last_auth_token: Arc::new(Mutex::new(None)),
-            channels: HashMap::new(),
+            channels: Arc::new(Mutex::new(HashMap::new())),
             next_channel_id: Arc::new(Mutex::new(1)),
             reconnect_attempts: Arc::new(Mutex::new(0)),
             last_received: Arc::new(Mutex::new(0)),
@@ -109,7 +108,7 @@ impl DxLinkWebSocketClient {
         let client = self.clone();
         connector
             .set_message_listener(Box::new(move |msg| {
-                let client = client.clone();
+                let mut client = client.clone();
                 tokio::spawn(async move {
                     let t = msg.message_type().to_string();
                     if let Err(e) = client.process_message(msg).await {
@@ -198,7 +197,7 @@ impl DxLinkWebSocketClient {
             pending_opens.insert(channel_id, open_tx);
         }
 
-        let (tx, _rx) = mpsc::channel::<Box<dyn Message + Send + Sync>>(32);
+        let (tx, mut rx) = mpsc::channel::<Box<dyn Message + Send + Sync>>(32);
         let channel = Arc::new(DxLinkWebSocketChannel::new(
             channel_id,
             service.clone(),
@@ -207,14 +206,29 @@ impl DxLinkWebSocketClient {
             &self.config,
         ));
 
-        self.channels.insert(channel_id, channel.clone());
+        // Spawn a task to handle messages from the channel
+        let connector = self.connector.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                if let Some(conn) = connector.lock().await.as_ref() {
+                    if let Err(e) = conn.send_message(msg).await {
+                        error!("Failed to send message from channel {}: {}", channel_id, e);
+                    }
+                }
+            }
+        });
+
+        // Add channel to map
+        debug!("Adding channel {} to channels map", channel_id);
+        self.channels.lock().await.insert(channel_id, channel.clone());
+        debug!("Channels map now contains {} channels", self.channels.lock().await.len());
 
         // Send channel request immediately if connected and authorized
         if *self.connection_state.lock().await == DxLinkConnectionState::Connected
             && *self.auth_state.lock().await == DxLinkAuthState::Authorized
         {
             debug!("Sending channel request for channel {} {} {}", channel_id, service, parameters);
-            self.send_message(Box::new(MessageType::ChannelRequest(
+            if let Err(e) = self.send_message(Box::new(MessageType::ChannelRequest(
                 ChannelRequestMessage {
                     message_type: "CHANNEL_REQUEST".to_string(),
                     channel: channel_id,
@@ -222,12 +236,20 @@ impl DxLinkWebSocketClient {
                     parameters: Some(parameters.clone()),
                 },
             )))
-            .await?;
+            .await {
+                error!("Failed to send channel request: {}", e);
+                return Err(Box::new(DxLinkError::new(
+                    DxLinkErrorType::BadAction,
+                    format!("Failed to send channel request: {}", e),
+                )));
+            }
             
             // Wait for channel to be opened with timeout
             match tokio::time::timeout(Duration::from_secs(5), open_rx).await {
                 Ok(Ok(_)) => {
                     debug!("Channel {} opened successfully", channel_id);
+                    // Ensure channel is in Opened state
+                    channel.process_status_opened();
                 },
                 Ok(Err(e)) => {
                     error!("Error waiting for channel open confirmation: {}", e);
@@ -354,74 +376,57 @@ impl DxLinkWebSocketClient {
         Ok(())
     }
 
-    async fn process_message(
-        &self,
+    pub async fn process_message(
+        &mut self,
         message: Box<dyn Message + Send + Sync>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), DxLinkError> {
         debug!(
             "Client processing message type: {} channel: {}",
             message.message_type(),
             message.channel()
         );
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
         *self.last_received.lock().await = now;
 
-        if is_connection_message(&message) {
-            debug!("Processing connection message: {}", message.message_type());
-            match message.message_type() {
-                "SETUP" => {
-                    debug!("Processing SETUP response");
-                    self.process_setup_message(&message).await?
-                }
-                "AUTH" => {
-                    debug!("Processing AUTH response");
-                }
-                "AUTH_STATE" => {
-                    debug!("Processing AUTH_STATE response");
-                    self.process_auth_state_message(&message).await?;
-                }
-                "ERROR" => {
-                    if let Some(error_msg) = message.as_any().downcast_ref::<ErrorMessage>() {
-                        debug!("Received error message: {} of type {:?}", error_msg.message, error_msg.error);
-                        
-                        // Create a more detailed error message that includes the channel information
-                        let detailed_message = if error_msg.channel == 0 {
-                            // Connection-level error
-                            format!("Connection error: {}", error_msg.message)
-                        } else {
-                            // Channel-specific error
-                            format!("Channel {} error: {}", error_msg.channel, error_msg.message)
-                        };
-                        
-                        self.publish_error(DxLinkError::new(
-                            error_msg.error,
-                            detailed_message,
-                        ));
-                    }
-                }
-                "KEEPALIVE" => debug!("Received keepalive message"), // Ignore keepalive messages
-                _ => warn!(
-                    "Unknown connection message type: {}",
+        let channel_id = message.channel();
+        debug!("Checking for channel {} in channels map", channel_id);
+        
+        // Handle channel messages first
+        if channel_id > 0 {
+            debug!("Channel ID is > 0, checking if channel exists in map");
+            let channels = self.channels.lock().await;
+            if let Some(channel) = channels.get(&channel_id) {
+                debug!(
+                    "Found channel {} in map, processing message type: {}",
+                    channel_id,
                     message.message_type()
-                ),
-            }
-        } else if is_channel_message(&message) {
-            let channel_id = message.channel();
-            if channel_id > 0 {
-                if let Some(channel) = self.channels.get(&channel_id) {
-                    if message.message_type() == "ERROR" {
+                );
+
+                match message.message_type() {
+                    "CHANNEL_OPENED" => {
+                        debug!("Processing CHANNEL_OPENED for channel {}", channel_id);
+                        channel.process_status_opened();
+                        channel.process_payload_message(&message);
+                        
+                        // After processing the message, signal that the channel is open
+                        if let Some(tx) = self.pending_channel_opens.lock().await.remove(&channel_id) {
+                            debug!("Signaling channel {} is open", channel_id);
+                            let _ = tx.send(());
+                        }
+                    }
+                    "ERROR" => {
                         if let Some(error_msg) = message.as_any().downcast_ref::<ErrorMessage>() {
                             debug!("Received error message for channel {}: {} of type {:?}", 
                                 channel_id, error_msg.message, error_msg.error);
                             
                             // Create a detailed message for the channel error
                             let detailed_message = format!(
-                                "Channel {} error ({}): {}", 
+                                "Channel {} error: {}", 
                                 channel_id,
-                                channel.service,
                                 error_msg.message
                             );
                             
@@ -430,72 +435,67 @@ impl DxLinkWebSocketClient {
                                 detailed_message,
                             ));
                         }
-                    } else if is_channel_lifecycle_message(&message) {
-                        match message.message_type() {
-                            "CHANNEL_OPENED" => {
-                                debug!(
-                                    "Processing CHANNEL_OPENED message for channel {}",
-                                    channel_id
-                                );
-                                channel.process_status_opened();
-                                channel.process_payload_message(&message);
-                                
-                                // Notify any waiting open_channel call
-                                if let Some(tx) = self.pending_channel_opens.lock().await.remove(&channel_id) {
-                                    debug!(
-                                        "Sending channel open confirmation for channel {}",
-                                        channel_id
-                                    );
-                                    let _ = tx.send(()); // Ignore errors as the receiver might be dropped
-                                }
-                            }
-                            "CHANNEL_CLOSED" => {
-                                debug!(
-                                    "Processing CHANNEL_CLOSED message for channel {}",
-                                    channel_id
-                                );
-                                channel.process_status_closed();
-                                channel.process_payload_message(&message);
-                            }
-                            _ => {}
-                        }
-                    } else {
-                        debug!(
-                            "Processing payload message for channel {}: {}",
-                            channel_id,
-                            message.message_type()
-                        );
+                    }
+                    _ => {
                         channel.process_payload_message(&message);
                     }
-                } else if message.message_type() == "CHANNEL_OPENED" {
-                    debug!("Received CHANNEL_OPENED for channel {} that isn't in channel map yet", channel_id);
-                    
-                    // If we find a pending open request, notify it
-                    if let Some(tx) = self.pending_channel_opens.lock().await.remove(&channel_id) {
-                        debug!("Sending channel open confirmation for channel {}", channel_id);
-                        let _ = tx.send(());
-                    }
-                } else {
-                    warn!("Received message for unknown channel: {}", channel_id);
                 }
+                return Ok(());
+            } else {
+                debug!("Channel {} not found in map", channel_id);
             }
+        } else {
+            debug!("Channel ID is <= 0, processing as connection message");
         }
 
-        if now - *self.last_sent.lock().await
-            >= self.config.keepalive_interval.as_secs() as u64 * 1000
-        {
-            debug!("Sending keepalive message");
-            self.send_message(Box::new(MessageType::KeepAlive(KeepaliveMessage {
-                message_type: "KEEPALIVE".to_string(),
-                channel: 0,
-            })))
-            .await?;
+        // Process connection messages
+        debug!("Processing connection message: {}", message.message_type());
+        match message.message_type() {
+            "SETUP" => {
+                debug!("Processing SETUP response");
+                if let Err(e) = self.process_setup_response(&message).await {
+                    return Err(DxLinkError::new(
+                        DxLinkErrorType::BadAction,
+                        format!("Failed to process setup response: {}", e),
+                    ));
+                }
+            }
+            "AUTH_STATE" => {
+                debug!("Processing AUTH_STATE response");
+                if let Err(e) = self.process_auth_state_response(&message).await {
+                    return Err(DxLinkError::new(
+                        DxLinkErrorType::BadAction,
+                        format!("Failed to process auth state response: {}", e),
+                    ));
+                }
+            }
+            "ERROR" => {
+                if let Some(error_msg) = message.as_any().downcast_ref::<ErrorMessage>() {
+                    debug!("Received error message: {} of type {:?}", error_msg.message, error_msg.error);
+                    
+                    // Create a more detailed error message that includes the channel information
+                    let detailed_message = if error_msg.channel == 0 {
+                        // Connection-level error
+                        format!("Connection error: {}", error_msg.message)
+                    } else {
+                        // Channel-specific error
+                        format!("Channel {} error: {}", error_msg.channel, error_msg.message)
+                    };
+                    
+                    self.publish_error(DxLinkError::new(
+                        error_msg.error,
+                        detailed_message,
+                    ));
+                }
+            }
+            "KEEPALIVE" => debug!("Received keepalive message"),
+            _ => debug!("Ignoring unknown message type: {}", message.message_type()),
         }
 
         Ok(())
     }
 
-    async fn process_setup_message(
+    async fn process_setup_response(
         &self,
         message: &Box<dyn Message + Send + Sync>,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -517,7 +517,7 @@ impl DxLinkWebSocketClient {
         Ok(())
     }
 
-    async fn process_auth_state_message(
+    async fn process_auth_state_response(
         &self,
         message: &Box<dyn Message + Send + Sync>,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -531,7 +531,7 @@ impl DxLinkWebSocketClient {
                     _ => warn!("Unknown auth state: {}", state),
                 }
             }
-            _ => warn!("Unexpected message type in process_auth_state_message"),
+            _ => warn!("Unexpected message type in process_auth_state_response"),
         }
         Ok(())
     }
@@ -568,7 +568,7 @@ impl DxLinkWebSocketClient {
 
         self.set_connection_state(DxLinkConnectionState::Connecting);
 
-        for channel in self.channels.values() {
+        for channel in self.channels.lock().await.values() {
             if channel.state() != DxLinkChannelState::Closed {
                 channel.process_status_requested();
             }

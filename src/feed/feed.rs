@@ -43,7 +43,7 @@ impl Default for FeedOptions {
 #[derive(Debug, Clone, Default)]
 pub struct FeedConfig {
     /// Time period in milliseconds for data aggregation
-    pub aggregation_period: u32,
+    pub aggregation_period: f64,
     /// Format specification for feed data
     pub data_format: FeedDataFormat,
     /// Optional field specifications for events
@@ -54,7 +54,7 @@ pub struct FeedConfig {
 #[derive(Debug, Clone, Default)]
 pub struct FeedAcceptConfig {
     /// Optional aggregation period to accept
-    pub accept_aggregation_period: Option<u32>,
+    pub accept_aggregation_period: Option<f64>,
     /// Optional data format to accept
     pub accept_data_format: Option<FeedDataFormat>,
     /// Optional event field specifications to accept
@@ -610,7 +610,7 @@ mod tests {
         };
 
         let new_config = FeedAcceptConfig {
-            accept_aggregation_period: Some(1000),
+            accept_aggregation_period: Some(1000.0),
             accept_data_format: Some(FeedDataFormat::Full),
             accept_event_fields: None,
         };
@@ -630,7 +630,7 @@ mod tests {
     async fn test_config() {
         let (event_tx, event_rx) = mpsc::channel(32);
         let initial_config = FeedConfig {
-            aggregation_period: 42,
+            aggregation_period: 42.0,
             data_format: FeedDataFormat::Full,
             event_fields: None,
         };
@@ -655,7 +655,7 @@ mod tests {
             data_rx
         };
         let returned_config = feed.config().await;
-        assert_eq!(returned_config.aggregation_period, 42);
+        assert_eq!(returned_config.aggregation_period, 42.0);
         assert_eq!(returned_config.data_format, FeedDataFormat::Full);
     }
 

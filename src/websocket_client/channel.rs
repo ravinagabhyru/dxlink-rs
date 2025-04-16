@@ -396,16 +396,17 @@ impl DxLinkWebSocketChannel {
         let prev_state = *state;
         *state = new_state;
 
-        // Notify listeners
-        for wrapper in self.state_listeners.lock().unwrap().iter() {
-            (wrapper.callback)(&new_state, &prev_state);
-        }
-
         // Log state change
         debug!(
             "Channel {} state changed: {:?} -> {:?}",
             self.id, prev_state, new_state
         );
+
+        // Notify listeners synchronously
+        let listeners = self.state_listeners.lock().unwrap();
+        for wrapper in listeners.iter() {
+            (wrapper.callback)(&new_state, &prev_state);
+        }
     }
 
     fn clear(&self) {

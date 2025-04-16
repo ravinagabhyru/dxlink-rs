@@ -417,7 +417,7 @@ mod tests {
 
         if let MessageType::FeedConfig(feed_config_msg) = msg_type {
             assert_eq!(feed_config_msg.channel, 1);
-            assert_eq!(feed_config_msg.aggregation_period, 1000);
+            assert_eq!(feed_config_msg.aggregation_period, 1000.0);
             assert!(matches!(feed_config_msg.data_format, FeedDataFormat::Full));
         } else {
             panic!("Not a FeedConfigMessage");

@@ -31,7 +31,7 @@ async fn test_feed_lifecycle() {
 
     // Configure the feed
     let config = FeedAcceptConfig {
-        accept_aggregation_period: Some(1000),
+        accept_aggregation_period: Some(1000.0),
         accept_data_format: Some(FeedDataFormat::Full),
         accept_event_fields: None,
     };
@@ -82,7 +82,7 @@ async fn test_feed_data_handling() {
 
     // Configure the feed to accept full format data
     let config = FeedAcceptConfig {
-        accept_aggregation_period: Some(1000),
+        accept_aggregation_period: Some(1000.0),
         accept_data_format: Some(FeedDataFormat::Full),
         accept_event_fields: None,
     };
@@ -137,7 +137,7 @@ async fn test_feed_config_handling() {
 
     // Configure the feed
     let config = FeedAcceptConfig {
-        accept_aggregation_period: Some(1000),
+        accept_aggregation_period: Some(1000.0),
         accept_data_format: Some(FeedDataFormat::Full),
         accept_event_fields: None,
     };
@@ -148,7 +148,7 @@ async fn test_feed_config_handling() {
 
     // Get the current configuration
     let current_config = feed.config().await;
-    assert_eq!(current_config.aggregation_period, 0); // Default value
+    assert_eq!(current_config.aggregation_period, 0.0); // Default value
     assert_eq!(current_config.data_format, FeedDataFormat::Full); // Default value
 
     // Close the feed
