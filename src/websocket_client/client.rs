@@ -20,7 +20,7 @@ use crate::websocket_client::{
     config::DxLinkWebSocketClientConfig,
     connector::WebSocketConnector,
     messages::{
-        AuthMessage, ChannelRequestMessage, ErrorMessage, 
+        AuthMessage, AuthStateMessage, ChannelRequestMessage, ErrorMessage,
         Message, MessageType, SetupMessage,
     },
 };
@@ -190,7 +190,7 @@ impl DxLinkWebSocketClient {
 
         // Create a oneshot channel for synchronization
         let (open_tx, open_rx) = tokio::sync::oneshot::channel();
-        
+
         // Store the sender before registering the channel
         {
             let mut pending_opens = self.pending_channel_opens.lock().await;
@@ -243,7 +243,7 @@ impl DxLinkWebSocketClient {
                     format!("Failed to send channel request: {}", e),
                 )));
             }
-            
+
             // Wait for channel to be opened with timeout
             match tokio::time::timeout(Duration::from_secs(5), open_rx).await {
                 Ok(Ok(_)) => {
@@ -350,8 +350,61 @@ impl DxLinkWebSocketClient {
         })))
         .await?;
 
-        // Connection state will be set to Connected when we receive SETUP response
         Ok(())
+
+        // // Set up a timeout for receiving SETUP response
+        // let setup_timeout = tokio::time::timeout(
+        //     Duration::from_secs(5), // 5 second timeout for SETUP response
+        //     async {
+        //         loop {
+        //             let message = self.connector.lock().await.as_ref().unwrap().read_next_message().await;
+        //             match message {
+        //                 Some(Ok(msg)) => {
+        //                     if let Ok(parsed) = WebSocketConnector::parse_message(msg) {
+        //                         if parsed.message_type() == "SETUP" {
+        //                             return Ok(());
+        //                         } else if parsed.message_type() == "ERROR" {
+        //                             if let Some(error_msg) = parsed.as_any().downcast_ref::<ErrorMessage>() {
+        //                                 return Err(DxLinkError::new(
+        //                                     error_msg.error,
+        //                                     format!("Setup error: {}", error_msg.message),
+        //                                 ));
+        //                             }
+        //                         }
+        //                     }
+        //                 }
+        //                 Some(Err(e)) => return Err(DxLinkError::new(
+        //                     DxLinkErrorType::Unknown,
+        //                     format!("Error reading message: {}", e),
+        //                 )),
+        //                 None => return Err(DxLinkError::new(
+        //                     DxLinkErrorType::Unknown,
+        //                     "Connection closed before SETUP response",
+        //                 )),
+        //             }
+        //         }
+        //     }
+        // ).await;
+
+        // match setup_timeout {
+        //     Ok(Ok(_)) => {
+        //         debug!("Received SETUP response within timeout");
+        //         Ok(())
+        //     }
+        //     Ok(Err(e)) => {
+        //         error!("Error during SETUP: {}", e);
+        //         self.disconnect().await?;
+        //         Err(Box::new(e))
+        //     }
+        //     Err(_) => {
+        //         error!("Timeout waiting for SETUP response");
+        //         self.disconnect().await?;
+        //         Err(Box::new(DxLinkError::new(
+        //             DxLinkErrorType::Timeout,
+        //             "Timeout waiting for SETUP response",
+        //         )))
+        //     }
+        // }
     }
 
     async fn process_transport_close(
@@ -394,7 +447,7 @@ impl DxLinkWebSocketClient {
 
         let channel_id = message.channel();
         debug!("Checking for channel {} in channels map", channel_id);
-        
+
         // Handle channel messages first
         if channel_id > 0 {
             debug!("Channel ID is > 0, checking if channel exists in map");
@@ -411,7 +464,7 @@ impl DxLinkWebSocketClient {
                         debug!("Processing CHANNEL_OPENED for channel {}", channel_id);
                         channel.process_status_opened();
                         channel.process_payload_message(&message);
-                        
+
                         // After processing the message, signal that the channel is open
                         if let Some(tx) = self.pending_channel_opens.lock().await.remove(&channel_id) {
                             debug!("Signaling channel {} is open", channel_id);
@@ -420,16 +473,16 @@ impl DxLinkWebSocketClient {
                     }
                     "ERROR" => {
                         if let Some(error_msg) = message.as_any().downcast_ref::<ErrorMessage>() {
-                            debug!("Received error message for channel {}: {} of type {:?}", 
+                            debug!("Received error message for channel {}: {} of type {:?}",
                                 channel_id, error_msg.message, error_msg.error);
-                            
+
                             // Create a detailed message for the channel error
                             let detailed_message = format!(
-                                "Channel {} error: {}", 
+                                "Channel {} error: {}",
                                 channel_id,
                                 error_msg.message
                             );
-                            
+
                             self.publish_error(DxLinkError::new(
                                 error_msg.error,
                                 detailed_message,
@@ -472,7 +525,7 @@ impl DxLinkWebSocketClient {
             "ERROR" => {
                 if let Some(error_msg) = message.as_any().downcast_ref::<ErrorMessage>() {
                     debug!("Received error message: {} of type {:?}", error_msg.message, error_msg.error);
-                    
+
                     // Create a more detailed error message that includes the channel information
                     let detailed_message = if error_msg.channel == 0 {
                         // Connection-level error
@@ -481,7 +534,7 @@ impl DxLinkWebSocketClient {
                         // Channel-specific error
                         format!("Channel {} error: {}", error_msg.channel, error_msg.message)
                     };
-                    
+
                     self.publish_error(DxLinkError::new(
                         error_msg.error,
                         detailed_message,
@@ -496,18 +549,31 @@ impl DxLinkWebSocketClient {
     }
 
     async fn process_setup_response(
-        &self,
+        &mut self,
         message: &Box<dyn Message + Send + Sync>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if message.message_type() == "SETUP" {
             let payload = message.payload();
+
+            // Validate required fields
+            if !payload["version"].is_string() {
+                return Err(Box::new(DxLinkError::new(
+                    DxLinkErrorType::InvalidMessage,
+                    "Missing or invalid version in SETUP response",
+                )));
+            }
+
             // Update connection details
             {
                 let mut details = self.connection_details.lock().await;
-                details.server_version =
-                    Some(payload["version"].as_str().unwrap_or("").to_string());
-                details.server_keepalive_timeout =
-                    payload["keepaliveTimeout"].as_u64().map(|t| t as u32);
+                details.server_version = Some(payload["version"].as_str().unwrap_or("").to_string());
+
+                // Store and use server's keepaliveTimeout
+                if let Some(timeout) = payload["keepaliveTimeout"].as_u64() {
+                    details.server_keepalive_timeout = Some(timeout as u32);
+                    // Update our keepalive timeout to match server's
+                    self.config.keepalive_timeout = Duration::from_secs(timeout);
+                }
             }
 
             *self.reconnect_attempts.lock().await = 0;
@@ -526,12 +592,32 @@ impl DxLinkWebSocketClient {
                 let payload = message.payload();
                 let state = payload["state"].as_str().unwrap_or("");
                 match state {
-                    "AUTHORIZED" => self.set_auth_state(DxLinkAuthState::Authorized),
-                    "UNAUTHORIZED" => self.set_auth_state(DxLinkAuthState::Unauthorized),
-                    _ => warn!("Unknown auth state: {}", state),
+                    "AUTHORIZED" => {
+                        debug!("Received AUTHORIZED state");
+                        self.set_auth_state(DxLinkAuthState::Authorized);
+                    }
+                    "UNAUTHORIZED" => {
+                        debug!("Received UNAUTHORIZED state");
+                        self.set_auth_state(DxLinkAuthState::Unauthorized);
+                        // Clear auth token on unauthorized state
+                        *self.last_auth_token.lock().await = None;
+                    }
+                    _ => {
+                        warn!("Unknown auth state: {}", state);
+                        return Err(Box::new(DxLinkError::new(
+                            DxLinkErrorType::BadAction,
+                            format!("Unknown auth state: {}", state),
+                        )));
+                    }
                 }
             }
-            _ => warn!("Unexpected message type in process_auth_state_response"),
+            _ => {
+                warn!("Unexpected message type in process_auth_state_response");
+                return Err(Box::new(DxLinkError::new(
+                    DxLinkErrorType::BadAction,
+                    "Unexpected message type in auth state response",
+                )));
+            }
         }
         Ok(())
     }
@@ -596,18 +682,108 @@ impl DxLinkWebSocketClient {
         Ok(())
     }
 
-    // Making this method public to avoid unused warning
     pub async fn send_auth_message(&self, token: String) -> Result<(), Box<dyn std::error::Error>> {
         debug!("Sending auth message");
+
+        // Validate token
+        if token.is_empty() {
+            return Err(Box::new(DxLinkError::new(
+                DxLinkErrorType::BadAction,
+                "Auth token cannot be empty",
+            )));
+        }
+
+        // Set auth state to Authorizing
         self.set_auth_state(DxLinkAuthState::Authorizing);
 
+        // Send auth message
         let auth_msg = Box::new(MessageType::Auth(AuthMessage {
             message_type: "AUTH".to_string(),
             channel: 0,
             token,
         }));
 
-        self.send_message(auth_msg).await
+        self.send_message(auth_msg).await?;
+
+        // Set up a timeout for receiving AUTH_STATE response
+        let auth_timeout = tokio::time::timeout(
+            Duration::from_secs(5),
+            async {
+                loop {
+                    let message = self.connector.lock().await.as_ref().unwrap().read_next_message().await;
+                    match message {
+                        Some(Ok(msg)) => {
+                            if let Ok(parsed) = WebSocketConnector::parse_message(msg) {
+                                if parsed.message_type() == "AUTH_STATE" {
+                                    if let Some(auth_state_msg) = parsed.as_any().downcast_ref::<AuthStateMessage>() {
+                                        match auth_state_msg.state.as_str() {
+                                            "AUTHORIZED" => {
+                                                self.set_auth_state(DxLinkAuthState::Authorized);
+                                                return Ok(());
+                                            }
+                                            "UNAUTHORIZED" => {
+                                                self.set_auth_state(DxLinkAuthState::Unauthorized);
+                                                return Err(DxLinkError::new(
+                                                    DxLinkErrorType::Unauthorized,
+                                                    "Authentication failed",
+                                                ));
+                                            }
+                                            _ => {
+                                                return Err(DxLinkError::new(
+                                                    DxLinkErrorType::BadAction,
+                                                    format!("Invalid auth state: {}", auth_state_msg.state),
+                                                ));
+                                            }
+                                        }
+                                    }
+                                } else if parsed.message_type() == "ERROR" {
+                                    if let Some(error_msg) = parsed.as_any().downcast_ref::<ErrorMessage>() {
+                                        self.set_auth_state(DxLinkAuthState::Unauthorized);
+                                        return Err(DxLinkError::new(
+                                            error_msg.error,
+                                            format!("Auth error: {}", error_msg.message),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        Some(Err(e)) => {
+                            self.set_auth_state(DxLinkAuthState::Unauthorized);
+                            return Err(DxLinkError::new(
+                                DxLinkErrorType::Unknown,
+                                format!("Error reading message: {}", e),
+                            ));
+                        }
+                        None => {
+                            self.set_auth_state(DxLinkAuthState::Unauthorized);
+                            return Err(DxLinkError::new(
+                                DxLinkErrorType::Unknown,
+                                "Connection closed before AUTH_STATE response",
+                            ));
+                        }
+                    }
+                }
+            }
+        ).await;
+
+        match auth_timeout {
+            Ok(Ok(_)) => {
+                debug!("Authentication successful");
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                error!("Authentication error: {}", e);
+                Err(Box::new(e))
+            }
+            Err(_) => {
+                error!("Timeout waiting for AUTH_STATE response");
+                self.set_auth_state(DxLinkAuthState::Unauthorized);
+                Err(Box::new(DxLinkError::new(
+                    DxLinkErrorType::Timeout,
+                    "Timeout waiting for authentication response",
+                )))
+            }
+        }
     }
 
     pub fn publish_error(&self, error: DxLinkError) {

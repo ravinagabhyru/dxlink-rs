@@ -101,14 +101,16 @@ impl Feed {
         client: Arc<Mutex<DxLinkWebSocketClient>>,
         contract: FeedContract,
         options: Option<FeedOptions>,
+        data_format: Option<FeedDataFormat>,
     ) -> Result<Self> {
         let (event_tx, event_rx) = mpsc::channel(32);
-        let (data_tx, data_rx) = broadcast::channel(100); // Channel for feed data events
+        let (data_tx, data_rx) = broadcast::channel(100);
         let options = options.unwrap_or_default();
 
+        let parameters = serde_json::to_value(FeedParameters { contract })?;
         let channel = client.lock().await.open_channel(
                     FEED_SERVICE_NAME.to_string(),
-                    serde_json::to_value(contract)?,
+                    parameters,
                 )
                 .await ;
 
@@ -183,7 +185,11 @@ impl Feed {
 
         let feed = Self {
             channel,
-            accept_config: Arc::new(Mutex::new(FeedAcceptConfig::default())),
+            accept_config: Arc::new(Mutex::new(FeedAcceptConfig {
+                accept_aggregation_period: None,
+                accept_data_format: data_format,
+                accept_event_fields: None,
+            })),
             config: config_clone,
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             touched_events: Arc::new(Mutex::new(HashSet::new())),
@@ -196,6 +202,9 @@ impl Feed {
 
         // Start event processing loop
         feed.start_event_loop();
+
+        // Send initial setup message with the requested data format
+        feed.send_accept_config().await;
 
         Ok(feed)
     }
@@ -511,6 +520,61 @@ impl Feed {
             tracing::error!("Failed to send accept config: {}", e);
         }
     }
+
+    /// Handle an incoming feed configuration message
+    async fn handle_feed_config(&self, message: FeedConfigMessage) {
+        let new_config = FeedConfig {
+            aggregation_period: message.aggregation_period,
+            data_format: message.data_format,
+            event_fields: message.event_fields.clone(),
+        };
+
+        // Log format change if it's different
+        {
+            let current = self.config.lock().await;
+            if current.data_format != new_config.data_format {
+                tracing::info!(
+                    "Feed data format changed from {:?} to {:?}",
+                    current.data_format,
+                    new_config.data_format
+                );
+            }
+        }
+
+        // Update config
+        *self.config.lock().await = new_config;
+    }
+
+    /// Handle an incoming feed data message
+    async fn handle_feed_data(&self, message: FeedDataMessage) {
+        let config = self.config.lock().await.clone();
+
+        match &message.data {
+            FeedData::Full(events) => {
+                // Forward each event to listeners
+                for event in events {
+                    let _ = self.data_tx.send(event.clone());
+                }
+            },
+            FeedData::Compact(_data) => {
+                // Process compact data if we have event fields configuration
+                if let Some(ref fields) = config.event_fields {
+                    match message.data.compact_to_full(fields) {
+                        Ok(events) => {
+                            for event in events {
+                                let _ = self.data_tx.send(event);
+                            }
+                        },
+                        Err(e) => {
+                            tracing::error!("Failed to convert compact data to full format: {}", e);
+                        }
+                    }
+                } else {
+                    tracing::error!("Received compact data but no event fields configuration available");
+                }
+            }
+        }
+    }
 }
 
 impl Clone for Feed {
@@ -544,6 +608,8 @@ impl From<mpsc::error::SendError<FeedEvent>> for DxLinkError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feed::events::{FeedEvent as FeedDataEvent, QuoteEvent, JSONDouble};
+    use crate::websocket_client::config::DxLinkWebSocketClientConfig;
     use crate::websocket_client::channel::DxLinkWebSocketChannel;
     use serde_json::json;
     use tokio::sync::mpsc;
@@ -691,20 +757,337 @@ mod tests {
             .await
             .unwrap();
         let received_event = event_tx
-            .send(FeedEvent::Subscribe(vec![sub1.clone(), sub2.clone()]))
+            .send(super::FeedEvent::Subscribe(vec![sub1.clone(), sub2.clone()]))
             .await;
         assert!(received_event.is_ok());
 
         // remove
         feed.remove_subscriptions(vec![sub1.clone()]).await.unwrap();
         let received_event = event_tx
-            .send(FeedEvent::Unsubscribe(vec![sub1.clone()]))
+            .send(super::FeedEvent::Unsubscribe(vec![sub1.clone()]))
             .await;
         assert!(received_event.is_ok());
 
         // Clear.
         feed.clear_subscriptions().await.unwrap();
-        let received_event = event_tx.send(FeedEvent::Reset).await;
+        let received_event = event_tx.send(super::FeedEvent::Reset).await;
         assert!(received_event.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_feed_new_requests_compact() {
+        let client = Arc::new(Mutex::new(DxLinkWebSocketClient::new(
+            DxLinkWebSocketClientConfig::default(),
+        )));
+
+        let feed = Feed::new(
+            client.clone(),
+            FeedContract::Stream,
+            None,
+            Some(FeedDataFormat::Compact),
+        ).await.unwrap();
+
+        // Verify the accept_config was set correctly
+        let accept_config = feed.accept_config.lock().await;
+        assert_eq!(accept_config.accept_data_format, Some(FeedDataFormat::Compact));
+    }
+
+    #[tokio::test]
+    async fn test_feed_new_requests_default_full() {
+        let client = Arc::new(Mutex::new(DxLinkWebSocketClient::new(
+            DxLinkWebSocketClientConfig::default(),
+        )));
+
+        let feed = Feed::new(
+            client.clone(),
+            FeedContract::Stream,
+            None,
+            None,
+        ).await.unwrap();
+
+        // Verify the accept_config was set correctly (default should be None)
+        let accept_config = feed.accept_config.lock().await;
+        assert_eq!(accept_config.accept_data_format, None);
+    }
+
+    #[tokio::test]
+    async fn test_feed_handles_config_message_compact() {
+        let (tx, _rx) = mpsc::channel(32);
+        let (data_tx, data_rx) = broadcast::channel(100);
+        let feed = Feed {
+            channel: Arc::new(DxLinkWebSocketChannel::new(
+                0,
+                "test".to_string(),
+                serde_json::json!({}),
+                tx,
+                &DxLinkWebSocketClientConfig::default(),
+            )),
+            accept_config: Arc::new(Mutex::new(FeedAcceptConfig::default())),
+            config: Arc::new(Mutex::new(FeedConfig::default())),
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            touched_events: Arc::new(Mutex::new(HashSet::new())),
+            options: FeedOptions::default(),
+            event_tx: tokio::sync::mpsc::channel(32).0,
+            event_rx: tokio::sync::mpsc::channel(32).1,
+            data_tx,
+            data_rx,
+        };
+
+        // Create a config message with Compact format and fields
+        let config_msg = FeedConfigMessage {
+            message_type: "FEED_CONFIG".to_string(),
+            channel: 0,
+            aggregation_period: 1000.0,
+            data_format: FeedDataFormat::Compact,
+            event_fields: Some(HashMap::from([
+                ("Quote".to_string(), vec!["bidPrice".to_string(), "askPrice".to_string()]),
+            ])),
+        };
+
+        // Handle the config message
+        feed.handle_feed_config(config_msg.clone()).await;
+
+        // Verify config was updated correctly
+        let config = feed.config.lock().await;
+        assert_eq!(config.data_format, FeedDataFormat::Compact);
+        assert_eq!(config.aggregation_period, 1000.0);
+        assert!(config.event_fields.is_some());
+        let fields = config.event_fields.as_ref().unwrap();
+        assert_eq!(
+            fields.get("Quote").unwrap(),
+            &vec!["bidPrice".to_string(), "askPrice".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_feed_handles_config_message_full() {
+        let (tx, _rx) = mpsc::channel(32);
+        let (data_tx, data_rx) = broadcast::channel(100);
+        let feed = Feed {
+            channel: Arc::new(DxLinkWebSocketChannel::new(
+                0,
+                "test".to_string(),
+                serde_json::json!({}),
+                tx,
+                &DxLinkWebSocketClientConfig::default(),
+            )),
+            accept_config: Arc::new(Mutex::new(FeedAcceptConfig::default())),
+            config: Arc::new(Mutex::new(FeedConfig::default())),
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            touched_events: Arc::new(Mutex::new(HashSet::new())),
+            options: FeedOptions::default(),
+            event_tx: tokio::sync::mpsc::channel(32).0,
+            event_rx: tokio::sync::mpsc::channel(32).1,
+            data_tx,
+            data_rx,
+        };
+
+        // Create a config message with Full format
+        let config_msg = FeedConfigMessage {
+            message_type: "FEED_CONFIG".to_string(),
+            channel: 0,
+            aggregation_period: 500.0,
+            data_format: FeedDataFormat::Full,
+            event_fields: None,
+        };
+
+        // Handle the config message
+        feed.handle_feed_config(config_msg.clone()).await;
+
+        // Verify config was updated correctly
+        let config = feed.config.lock().await;
+        assert_eq!(config.data_format, FeedDataFormat::Full);
+        assert_eq!(config.aggregation_period, 500.0);
+        assert!(config.event_fields.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_feed_processes_full_data_when_full_config() {
+        let (tx, _rx) = mpsc::channel(32);
+        let (data_tx, data_rx) = broadcast::channel(100);
+        let feed = Feed {
+            channel: Arc::new(DxLinkWebSocketChannel::new(
+                0,
+                "test".to_string(),
+                serde_json::json!({}),
+                tx,
+                &DxLinkWebSocketClientConfig::default(),
+            )),
+            accept_config: Arc::new(Mutex::new(FeedAcceptConfig::default())),
+            config: Arc::new(Mutex::new(FeedConfig {
+                aggregation_period: 0.0,
+                data_format: FeedDataFormat::Full,
+                event_fields: None,
+            })),
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            touched_events: Arc::new(Mutex::new(HashSet::new())),
+            options: FeedOptions::default(),
+            event_tx: tokio::sync::mpsc::channel(32).0,
+            event_rx: tokio::sync::mpsc::channel(32).1,
+            data_tx: data_tx.clone(),
+            data_rx,
+        };
+
+        // Create a full format data message
+        let data_msg = FeedDataMessage {
+            message_type: "FEED_DATA".to_string(),
+            channel: 0,
+            data: FeedData::Full(vec![
+                FeedDataEvent::Quote(QuoteEvent {
+                    event_symbol: "AAPL".to_string(),
+                    event_time: Some(1234567890),
+                    sequence: None,
+                    time_nano_part: None,
+                    bid_time: None,
+                    bid_exchange_code: None,
+                    bid_price: Some(JSONDouble::Number(150.0)),
+                    bid_size: Some(JSONDouble::Number(100.0)),
+                    ask_time: None,
+                    ask_exchange_code: None,
+                    ask_price: Some(JSONDouble::Number(151.0)),
+                    ask_size: Some(JSONDouble::Number(200.0)),
+                })
+            ]),
+        };
+
+        // Subscribe to events before sending data
+        let mut rx = data_tx.subscribe();
+
+        // Handle the data message
+        feed.handle_feed_data(data_msg).await;
+
+        // Use timeout for receiving the event
+        let event = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            rx.recv()
+        ).await.expect("Timeout waiting for event").expect("Failed to receive event");
+
+        match event {
+            FeedDataEvent::Quote(quote) => {
+                assert_eq!(quote.event_symbol, "AAPL");
+                assert!(matches!(quote.bid_price, Some(JSONDouble::Number(n)) if n == 150.0));
+                assert!(matches!(quote.ask_price, Some(JSONDouble::Number(n)) if n == 151.0));
+            },
+            _ => panic!("Expected Quote event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_feed_processes_compact_data_when_compact_config() {
+        let (tx, _rx) = mpsc::channel(32);
+        let (data_tx, data_rx) = broadcast::channel(100);
+        let feed = Feed {
+            channel: Arc::new(DxLinkWebSocketChannel::new(
+                0,
+                "test".to_string(),
+                serde_json::json!({}),
+                tx,
+                &DxLinkWebSocketClientConfig::default(),
+            )),
+            accept_config: Arc::new(Mutex::new(FeedAcceptConfig::default())),
+            config: Arc::new(Mutex::new(FeedConfig {
+                aggregation_period: 0.0,
+                data_format: FeedDataFormat::Compact,
+                event_fields: Some(HashMap::from([
+                    ("Quote".to_string(), vec![
+                        "eventSymbol".to_string(),
+                        "eventTime".to_string(),
+                        "bidPrice".to_string(),
+                        "askPrice".to_string(),
+                    ]),
+                ])),
+            })),
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            touched_events: Arc::new(Mutex::new(HashSet::new())),
+            options: FeedOptions::default(),
+            event_tx: tokio::sync::mpsc::channel(32).0,
+            event_rx: tokio::sync::mpsc::channel(32).1,
+            data_tx: data_tx.clone(),
+            data_rx,
+        };
+
+        // Create a compact format data message
+        let data_msg = FeedDataMessage {
+            message_type: "FEED_DATA".to_string(),
+            channel: 0,
+            data: FeedData::Compact(vec![
+                ("Quote".to_string(), vec![
+                    serde_json::Value::String("AAPL".to_string()),
+                    serde_json::Value::Number(1234567890.into()),
+                    serde_json::Value::Number(150.into()),
+                    serde_json::Value::Number(151.into()),
+                ]),
+            ]),
+        };
+
+        // Subscribe to events before sending data
+        let mut rx = data_tx.subscribe();
+
+        // Handle the data message
+        feed.handle_feed_data(data_msg).await;
+
+        // Use timeout for receiving the event
+        let event = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            rx.recv()
+        ).await.expect("Timeout waiting for event").expect("Failed to receive event");
+
+        match event {
+            FeedDataEvent::Quote(quote) => {
+                assert_eq!(quote.event_symbol, "AAPL");
+                assert_eq!(quote.event_time, Some(1234567890));
+                assert!(matches!(quote.bid_price, Some(JSONDouble::Number(n)) if n == 150.0));
+                assert!(matches!(quote.ask_price, Some(JSONDouble::Number(n)) if n == 151.0));
+            },
+            _ => panic!("Expected Quote event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_feed_errors_on_compact_data_without_fields() {
+        let (tx, _rx) = mpsc::channel(32);
+        let (data_tx, data_rx) = broadcast::channel(100);
+        let feed = Feed {
+            channel: Arc::new(DxLinkWebSocketChannel::new(
+                0,
+                "test".to_string(),
+                serde_json::json!({}),
+                tx,
+                &DxLinkWebSocketClientConfig::default(),
+            )),
+            accept_config: Arc::new(Mutex::new(FeedAcceptConfig::default())),
+            config: Arc::new(Mutex::new(FeedConfig {
+                aggregation_period: 0.0,
+                data_format: FeedDataFormat::Compact,
+                event_fields: None,
+            })),
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            touched_events: Arc::new(Mutex::new(HashSet::new())),
+            options: FeedOptions::default(),
+            event_tx: tokio::sync::mpsc::channel(32).0,
+            event_rx: tokio::sync::mpsc::channel(32).1,
+            data_tx,
+            data_rx,
+        };
+
+        // Create a compact format data message
+        let data_msg = FeedDataMessage {
+            message_type: "FEED_DATA".to_string(),
+            channel: 0,
+            data: FeedData::Compact(vec![
+                ("Quote".to_string(), vec![
+                    serde_json::Value::String("AAPL".to_string()),
+                    serde_json::Value::Number(150.into()),
+                    serde_json::Value::Number(151.into()),
+                ]),
+            ]),
+        };
+
+        // Handle the data message
+        feed.handle_feed_data(data_msg).await;
+
+        // Verify no events were broadcast
+        let mut rx = feed.data_tx.subscribe();
+        assert!(rx.try_recv().is_err());
     }
 }

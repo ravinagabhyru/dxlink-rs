@@ -25,6 +25,7 @@ async fn test_feed_lifecycle() {
         client.clone(),
         FeedContract::Auto,
         Some(FeedOptions::default()),
+        Some(FeedDataFormat::Full),
     )
     .await
     .expect("Failed to create feed service");
@@ -76,6 +77,7 @@ async fn test_feed_data_handling() {
         client.clone(),
         FeedContract::Auto,
         Some(FeedOptions::default()),
+        Some(FeedDataFormat::Full),
     )
     .await
     .expect("Failed to create feed service");
@@ -131,6 +133,7 @@ async fn test_feed_config_handling() {
         client.clone(),
         FeedContract::Auto,
         Some(FeedOptions::default()),
+        Some(FeedDataFormat::Full),
     )
     .await
     .expect("Failed to create feed service");
@@ -173,6 +176,7 @@ async fn test_feed_subscription_management() {
         client.clone(),
         FeedContract::Auto,
         Some(FeedOptions::default()),
+        Some(FeedDataFormat::Full),
     )
     .await
     .expect("Failed to create feed service");

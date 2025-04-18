@@ -149,7 +149,7 @@ where
 }
 
 /// Union type for all feed event types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "eventType")]
 pub enum FeedEvent {
     /// Quote event with bid/ask prices, sizes, etc.
@@ -189,7 +189,7 @@ pub enum FeedEvent {
 }
 
 /// Quote event with bid/ask information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct QuoteEvent {
     /// Symbol for this event
@@ -219,7 +219,7 @@ pub struct QuoteEvent {
 }
 
 /// Profile event with security instrument details
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileEvent {
     /// Symbol for this event
@@ -261,7 +261,7 @@ pub struct ProfileEvent {
 }
 
 /// Trade event with last trade information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TradeEvent {
     /// Symbol for this event
@@ -295,7 +295,7 @@ pub struct TradeEvent {
 }
 
 /// Extended trading hours trade event
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TradeETHEvent {
     /// Symbol for this event
@@ -329,7 +329,7 @@ pub struct TradeETHEvent {
 }
 
 /// Candle event with OHLC data
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CandleEvent {
     /// Symbol for this event
@@ -365,7 +365,7 @@ pub struct CandleEvent {
 }
 
 /// Summary event with session information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SummaryEvent {
     /// Symbol for this event
@@ -397,7 +397,7 @@ pub struct SummaryEvent {
 }
 
 /// Time and sale event for trade history
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TimeAndSaleEvent {
     /// Symbol for this event
@@ -431,7 +431,7 @@ pub struct TimeAndSaleEvent {
 }
 
 /// Greeks event with option pricing data
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GreeksEvent {
     /// Symbol for this event
@@ -455,7 +455,7 @@ pub struct GreeksEvent {
 }
 
 /// Theoretical price event
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TheoPriceEvent {
     /// Symbol for this event
@@ -479,7 +479,7 @@ pub struct TheoPriceEvent {
 }
 
 /// Underlying event with option underlying data
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct UnderlyingEvent {
     /// Symbol for this event
@@ -501,7 +501,7 @@ pub struct UnderlyingEvent {
 }
 
 /// Option sale event
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct OptionSaleEvent {
     /// Symbol for this event
@@ -529,7 +529,7 @@ pub struct OptionSaleEvent {
 }
 
 /// Series event with option series data
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SeriesEvent {
     /// Symbol for this event
@@ -557,7 +557,7 @@ pub struct SeriesEvent {
 }
 
 /// Order event with market depth information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct OrderEvent {
     /// Symbol for this event
@@ -595,7 +595,7 @@ pub struct OrderEvent {
 }
 
 /// Spread order event
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SpreadOrderEvent {
     /// Symbol for this event
@@ -633,7 +633,7 @@ pub struct SpreadOrderEvent {
 }
 
 /// Analytic order event with enhanced information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyticOrderEvent {
     /// Symbol for this event
@@ -681,7 +681,7 @@ pub struct AnalyticOrderEvent {
 }
 
 /// Configuration event with service configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigurationEvent {
     /// Symbol for this event
@@ -693,7 +693,7 @@ pub struct ConfigurationEvent {
 }
 
 /// Message event for text notifications
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageEvent {
     /// Symbol for this event (if applicable)

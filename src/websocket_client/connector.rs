@@ -145,6 +145,66 @@ impl WebSocketConnector {
         &self.url
     }
 
+    /// Read the next message from the WebSocket stream
+    pub async fn read_next_message(&self) -> Option<Result<WsMessage, tokio_tungstenite::tungstenite::Error>> {
+        if let Some(stream) = self.read_stream.lock().await.as_mut() {
+            stream.next().await
+        } else {
+            None
+        }
+    }
+
+    /// Parse a WebSocket message into a dxLink message
+    pub fn parse_message(msg: WsMessage) -> Result<Box<dyn Message + Send + Sync>, serde_json::Error> {
+        match msg {
+            WsMessage::Text(text) => {
+                let value: Value = serde_json::from_str(&text)?;
+                let msg_type = value["type"].as_str().unwrap_or("");
+
+                let message_result: Result<Box<dyn Message + Send + Sync>, serde_json::Error> = match msg_type {
+                    // Connection/authentication messages
+                    "SETUP" => serde_json::from_value::<SetupMessage>(value.clone())
+                        .map(|m| Box::new(MessageType::Setup(m)) as Box<dyn Message + Send + Sync>),
+
+                    "AUTH_STATE" => serde_json::from_value::<AuthStateMessage>(value.clone())
+                        .map(|m| Box::new(MessageType::AuthState(m)) as Box<dyn Message + Send + Sync>),
+
+                    "KEEPALIVE" => serde_json::from_value::<KeepaliveMessage>(value.clone())
+                        .map(|m| Box::new(MessageType::KeepAlive(m)) as Box<dyn Message + Send + Sync>),
+
+                    // Channel lifecycle messages
+                    "CHANNEL_OPENED" => serde_json::from_value::<ChannelOpenedMessage>(value.clone())
+                        .map(|m| Box::new(MessageType::ChannelOpened(m)) as Box<dyn Message + Send + Sync>),
+
+                    "CHANNEL_CLOSED" => serde_json::from_value::<ChannelClosedMessage>(value.clone())
+                        .map(|m| Box::new(MessageType::ChannelClosed(m)) as Box<dyn Message + Send + Sync>),
+
+                    "ERROR" => serde_json::from_value::<ErrorMessage>(value.clone())
+                        .map(|m| Box::new(MessageType::Error(m)) as Box<dyn Message + Send + Sync>),
+
+                    // FEED messages
+                    "FEED_CONFIG" => serde_json::from_value::<FeedConfigMessage>(value.clone())
+                        .map(|m| Box::new(MessageType::FeedConfig(m)) as Box<dyn Message + Send + Sync>),
+
+                    "FEED_DATA" => serde_json::from_value::<FeedDataMessage>(value.clone())
+                        .map(|m| Box::new(MessageType::FeedData(m)) as Box<dyn Message + Send + Sync>),
+
+                    // DOM messages
+                    "DOM_CONFIG" => serde_json::from_value::<DomConfigMessage>(value.clone())
+                        .map(|m| Box::new(MessageType::DomConfig(m)) as Box<dyn Message + Send + Sync>),
+
+                    "DOM_SNAPSHOT" => serde_json::from_value::<DomSnapshotMessage>(value.clone())
+                        .map(|m| Box::new(MessageType::DomSnapshot(m)) as Box<dyn Message + Send + Sync>),
+
+                    _ => Err(serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Unknown message type: {}", msg_type)))),
+                };
+
+                message_result
+            }
+            _ => Err(serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::InvalidData, "Expected text message"))),
+        }
+    }
+
     async fn handle_message(
         msg: WsMessage,
         message_listener: Arc<Mutex<Option<MessageListener>>>,
@@ -306,6 +366,9 @@ impl WebSocketConnector {
 #[cfg(test)]
 mod tests {
     use crate::{DxLinkErrorType, FeedDataFormat};
+    use crate::feed::messages::FeedData;
+    use crate::feed::events::FeedEvent;
+    use crate::feed::events::JSONDouble;
 
     use super::*;
     use std::sync::Arc;
@@ -691,4 +754,138 @@ mod tests {
                 panic!("Not an ErrorMessage");
             }
         }
+
+    #[tokio::test]
+    async fn test_connector_parses_feed_data_full() {
+        // Create a channel to receive the parsed message
+        let (tx, mut rx) = mpsc::channel(1);
+
+        // Create a message listener
+        let message_listener: MessageListener = Box::new(move |msg| {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let _ = tx.send(msg).await;
+            });
+        });
+
+        let message_listener = Arc::new(Mutex::new(Some(message_listener)));
+
+        // Create a valid FEED_DATA message in full format
+        let feed_data_json = r#"{
+            "type": "FEED_DATA",
+            "channel": 1,
+            "data": [
+                {
+                    "eventSymbol": "AAPL",
+                    "eventType": "Quote",
+                    "bidPrice": 123.45,
+                    "askPrice": 123.46,
+                    "bidSize": 100,
+                    "askSize": 200
+                }
+            ]
+        }"#;
+        let ws_message = WsMessage::Text(feed_data_json.to_string());
+
+        // Process the message
+        let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
+
+        // Verify the message was processed successfully
+        assert!(result.is_ok(), "handle_message returned an error: {:?}", result);
+
+        // Verify the message was forwarded to the listener
+        let received_msg = rx.recv().await.expect("No message received from listener");
+
+        // Verify the message type is correct
+        assert_eq!(received_msg.message_type(), "FEED_DATA");
+
+        // Verify the message is a FeedDataMessage
+        let msg_any = received_msg.as_any();
+        let msg_type = msg_any.downcast_ref::<MessageType>().expect("Not a MessageType");
+
+        if let MessageType::FeedData(feed_data_msg) = msg_type {
+            assert_eq!(feed_data_msg.channel, 1);
+            assert!(feed_data_msg.data.is_full());
+            if let FeedData::Full(events) = &feed_data_msg.data {
+                assert_eq!(events.len(), 1);
+                if let FeedEvent::Quote(quote) = &events[0] {
+                    assert_eq!(quote.event_symbol, "AAPL");
+                    assert!(matches!(quote.bid_price, Some(JSONDouble::Number(n)) if n == 123.45));
+                    assert!(matches!(quote.ask_price, Some(JSONDouble::Number(n)) if n == 123.46));
+                    assert!(matches!(quote.bid_size, Some(JSONDouble::Number(n)) if n == 100.0));
+                    assert!(matches!(quote.ask_size, Some(JSONDouble::Number(n)) if n == 200.0));
+                } else {
+                    panic!("Expected Quote event");
+                }
+            } else {
+                panic!("Expected Full data format");
+            }
+        } else {
+            panic!("Not a FeedDataMessage");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connector_parses_feed_data_compact() {
+        // Create a channel to receive the parsed message
+        let (tx, mut rx) = mpsc::channel(1);
+
+        // Create a message listener
+        let message_listener: MessageListener = Box::new(move |msg| {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let _ = tx.send(msg).await;
+            });
+        });
+
+        let message_listener = Arc::new(Mutex::new(Some(message_listener)));
+
+        // Create a valid FEED_DATA message in compact format
+        let feed_data_json = r#"{
+            "type": "FEED_DATA",
+            "channel": 1,
+            "data": [
+                "Quote",
+                ["AAPL", "Quote", 123.45, 123.46, 100, 200]
+            ]
+        }"#;
+        let ws_message = WsMessage::Text(feed_data_json.to_string());
+
+        // Process the message
+        let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
+
+        // Verify the message was processed successfully
+        assert!(result.is_ok(), "handle_message returned an error: {:?}", result);
+
+        // Verify the message was forwarded to the listener
+        let received_msg = rx.recv().await.expect("No message received from listener");
+
+        // Verify the message type is correct
+        assert_eq!(received_msg.message_type(), "FEED_DATA");
+
+        // Verify the message is a FeedDataMessage
+        let msg_any = received_msg.as_any();
+        let msg_type = msg_any.downcast_ref::<MessageType>().expect("Not a MessageType");
+
+        if let MessageType::FeedData(feed_data_msg) = msg_type {
+            assert_eq!(feed_data_msg.channel, 1);
+            assert!(feed_data_msg.data.is_compact());
+            if let FeedData::Compact(data) = &feed_data_msg.data {
+                assert_eq!(data.len(), 1);
+                let (event_type, values) = &data[0];
+                assert_eq!(event_type, "Quote");
+                assert_eq!(values.len(), 6);
+                assert_eq!(values[0], "AAPL");
+                assert_eq!(values[1], "Quote");
+                assert_eq!(values[2], 123.45);
+                assert_eq!(values[3], 123.46);
+                assert_eq!(values[4], 100);
+                assert_eq!(values[5], 200);
+            } else {
+                panic!("Expected Compact data format");
+            }
+        } else {
+            panic!("Not a FeedDataMessage");
+        }
+    }
 }

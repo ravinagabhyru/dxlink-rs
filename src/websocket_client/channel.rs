@@ -282,9 +282,8 @@ impl DxLinkWebSocketChannel {
         {
             Ok(result) => {
                 result.map_err(|e| ChannelError::SendError(e.to_string()))?;
-                // Change to Requested state to indicate we're waiting for server confirmation
-                // The server will respond with CHANNEL_CLOSED, which will trigger process_status_closed()
-                self.process_status_requested();
+                // Transition directly to Closed state
+                self.process_status_closed();
                 Ok(())
             }
             Err(_) => Err(ChannelError::Timeout {
@@ -491,124 +490,6 @@ impl DxLinkWebSocketChannel {
     }
 }
 
-// Implementing the trait
-// impl DxLinkChannel for DxLinkWebSocketChannel {
-//     fn clone_box(&self) -> Box<dyn DxLinkChannel + Send + Sync> {
-//         Box::new(Self {
-//             id: self.id,
-//             service: self.service.clone(),
-//             parameters: self.parameters.clone(),
-//             state: self.state.clone(),
-//             message_sender: self.message_sender.clone(),
-//             message_listeners: self.message_listeners.clone(),
-//             state_listeners: self.state_listeners.clone(),
-//             error_listeners: self.error_listeners.clone(),
-//         })
-//     }
-
-//     fn id(&self) -> u64 {
-//         self.id
-//     }
-
-//     fn service(&self) -> &str {
-//         &self.service
-//     }
-
-//     fn parameters(&self) -> HashMap<String, Value> {
-//         // Convert serde_json::Value to HashMap<String, serde_json::Value>
-//         match serde_json::from_value(self.parameters.clone()) {
-//             Ok(params) => params,
-//             Err(_) => HashMap::new(), // Return an empty map on conversion failure
-//         }
-//     }
-
-//     fn send(&self, message: channel::DxLinkChannelMessage) {
-//         let this = self.clone();
-//         let adapted_message = DxLinkChannelMessage {
-//             message_type: message.message_type,
-//             payload: message.payload,
-//         };
-//         tokio::spawn(async move {
-//             if let Err(e) = this.send(adapted_message).await {
-//                 error!("Failed to send message: {}", e);
-//             }
-//         });
-//     }
-
-//     /// Add a message listener
-//     fn add_message_listener(&self, listener: channel::ChannelMessageListener) {
-//         let wrapper = CallbackWrapper {
-//             id: Uuid::new_v4(),
-//             callback: Arc::new(listener),
-//         };
-//         self.message_listeners.lock().unwrap().insert(wrapper);
-//     }
-
-//     /// Remove a message listener
-//     fn remove_message_listener(&mut self, listener: ChannelMessageListener) {
-//         let wrapper = CallbackWrapper {
-//             id: Uuid::new_v4(),
-//             callback: Arc::new(listener),
-//         };
-//         // Since we can't compare function pointers directly, we'll remove all listeners
-//         // This is a temporary solution until we implement a better way to track listeners
-//         self.message_listeners.lock().unwrap().clear();
-//     }
-
-//     fn state(&self) -> channel::DxLinkChannelState {
-//         *self.state.lock().unwrap()
-//     }
-
-//     /// Add a state change listener
-//     fn add_state_change_listener(&mut self, listener: channel::ChannelStateChangeListener) {
-//         let wrapper = CallbackWrapper {
-//             id: Uuid::new_v4(),
-//             callback: Arc::new(listener),
-//         };
-//         self.state_listeners.lock().unwrap().insert(wrapper);
-//     }
-
-//     /// Remove a state change listener
-//     fn remove_state_change_listener(&mut self, listener: channel::ChannelStateChangeListener) {
-//         let wrapper = CallbackWrapper {
-//             id: Uuid::new_v4(),
-//             callback: Arc::new(listener),
-//         };
-//         // Since we can't compare function pointers directly, we'll remove all listeners
-//         // This is a temporary solution until we implement a better way to track listeners
-//         self.state_listeners.lock().unwrap().clear();
-//     }
-
-//     /// Add an error listener
-//     fn add_error_listener(&mut self, listener: channel::ChannelErrorListener) {
-//         let wrapper = CallbackWrapper {
-//             id: Uuid::new_v4(),
-//             callback: Arc::new(listener),
-//         };
-//         self.error_listeners.lock().unwrap().insert(wrapper);
-//     }
-
-//     /// Remove an error listener
-//     fn remove_error_listener(&mut self, listener: channel::ChannelErrorListener) {
-//         let wrapper = CallbackWrapper {
-//             id: Uuid::new_v4(),
-//             callback: Arc::new(listener),
-//         };
-//         // Since we can't compare function pointers directly, we'll remove all listeners
-//         // This is a temporary solution until we implement a better way to track listeners
-//         self.error_listeners.lock().unwrap().clear();
-//     }
-
-//     fn close(&mut self) {
-//         let this = self.clone();
-//         tokio::spawn(async move {
-//             if let Err(e) = this.close().await {
-//                 error!("Error closing channel: {}", e);
-//             }
-//         });
-//     }
-// }
-
 impl Clone for DxLinkWebSocketChannel {
     fn clone(&self) -> Self {
         Self {
@@ -623,79 +504,6 @@ impl Clone for DxLinkWebSocketChannel {
         }
     }
 }
-
-// impl DxLinkChannel for Arc<DxLinkWebSocketChannel> {
-//     fn clone_box(&self) -> Box<dyn DxLinkChannel + Send + Sync> {
-//         Box::new(self.clone())
-//     }
-
-//     fn id(&self) -> u64 {
-//         (**self).id()
-//     }
-
-//     fn service(&self) -> &str {
-//         (**self).service()
-//     }
-
-//     fn parameters(&self) -> HashMap<String, Value> {
-//         (**self).parameters()
-//     }
-
-//     fn send(&self, message: channel::DxLinkChannelMessage) {
-//         let this = (**self).clone();
-//         let payload = serde_json::to_value(message.payload).expect("Failed to serialize payload");
-//         let adapted_message = DxLinkChannelMessage {
-//             message_type: message.message_type,
-//             payload,
-//         };
-//         tokio::spawn(async move {
-//             if let Err(e) = this.send(adapted_message).await {
-//                 error!("Failed to send message: {}", e);
-//             }
-//         });
-//     }
-
-//     fn add_message_listener(&self, listener: channel::ChannelMessageListener) {
-//         self.as_ref().add_message_listener(listener);
-//     }
-
-//     fn remove_message_listener(&mut self, listener: channel::ChannelMessageListener) {
-//         Arc::get_mut(self)
-//             .unwrap()
-//             .remove_message_listener(listener)
-//     }
-
-//     fn state(&self) -> channel::DxLinkChannelState {
-//         (**self).state()
-//     }
-
-//     fn add_state_change_listener(&mut self, listener: channel::ChannelStateChangeListener) {
-//         Arc::get_mut(self)
-//             .unwrap()
-//             .add_state_change_listener(listener)
-//     }
-//     fn remove_state_change_listener(&mut self, listener: channel::ChannelStateChangeListener) {
-//         Arc::get_mut(self)
-//             .unwrap()
-//             .remove_state_change_listener(listener)
-//     }
-//     fn add_error_listener(&mut self, listener: channel::ChannelErrorListener) {
-//         Arc::get_mut(self).unwrap().add_error_listener(listener);
-//     }
-
-//     fn remove_error_listener(&mut self, listener: channel::ChannelErrorListener) {
-//         Arc::get_mut(self).unwrap().remove_error_listener(listener);
-//     }
-
-//     fn close(&mut self) {
-//         let this = self.clone();
-//         tokio::spawn(async move {
-//             if let Err(e) = DxLinkWebSocketChannel::close(&*this).await {
-//                 error!("Error closing channel: {}", e);
-//             }
-//         });
-//     }
-// }
 
 #[cfg(test)]
 mod tests {
@@ -1278,9 +1086,8 @@ mod tests {
         let close_result = channel.close().await;
         assert!(close_result.is_ok());
 
-        // The state remains Opened because Opened->Requested is not a valid transition
-        // in the set_state method
-        assert_eq!(channel.state(), DxLinkChannelState::Opened);
+        // The state should transition to Closed after sending CHANNEL_CANCEL
+        assert_eq!(channel.state(), DxLinkChannelState::Closed);
 
         // Verify sent message
         if let Some(msg) = rx.recv().await {
@@ -1292,11 +1099,6 @@ mod tests {
                 _ => panic!("Expected ChannelCancel message"),
             }
         }
-
-        // Simulate receiving CHANNEL_CLOSED from server
-        // This will work because Opened->Closed is a valid transition
-        channel.process_status_closed();
-        assert_eq!(channel.state(), DxLinkChannelState::Closed);
 
         // Test closing already closed channel
         let result = channel.close().await;

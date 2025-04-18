@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use async_trait;
 
-use crate::DxLinkErrorType;
+use crate::core::errors::{DxLinkError, DxLinkErrorType};
 
 use crate::feed::messages::{FeedSetupMessage, FeedConfigMessage, FeedSubscriptionMessage, FeedDataMessage};
 use crate::dom::messages::{DomSetupMessage, DomConfigMessage, DomSnapshotMessage};
@@ -139,6 +139,7 @@ impl Message for AuthMessage {
         serde_json::to_value(self).unwrap()
     }
 }
+
 /// Message for authentication state changes
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthStateMessage {
@@ -149,17 +150,48 @@ pub struct AuthStateMessage {
 }
 
 impl Message for AuthStateMessage {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn message_type(&self) -> &'static str {
         "AUTH_STATE"
     }
+
     fn channel(&self) -> u64 {
         self.channel
     }
+
     fn payload(&self) -> Value {
-        serde_json::to_value(self).unwrap()
+        json!({
+            "state": self.state
+        })
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl TryFrom<serde_json::Value> for AuthStateMessage {
+    type Error = Box<dyn std::error::Error>;
+
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        let message_type = value["messageType"]
+            .as_str()
+            .ok_or_else(|| DxLinkError::new(DxLinkErrorType::BadAction, "Missing messageType"))?
+            .to_string();
+
+        let channel = value["channel"]
+            .as_u64()
+            .ok_or_else(|| DxLinkError::new(DxLinkErrorType::BadAction, "Missing channel"))?;
+
+        let state = value["payload"]["state"]
+            .as_str()
+            .ok_or_else(|| DxLinkError::new(DxLinkErrorType::BadAction, "Missing state"))?
+            .to_string();
+
+        Ok(AuthStateMessage {
+            message_type,
+            channel,
+            state,
+        })
     }
 }
 
@@ -336,10 +368,6 @@ impl Message for ErrorMessage {
         serde_json::to_value(self).unwrap()
     }
 }
-
-
-
-
 
 /// Message utilities
 pub mod util {
