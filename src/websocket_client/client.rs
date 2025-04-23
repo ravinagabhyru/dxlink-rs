@@ -20,7 +20,7 @@ use crate::websocket_client::{
     config::DxLinkWebSocketClientConfig,
     connector::WebSocketConnector,
     messages::{
-        AuthMessage, AuthStateMessage, ChannelRequestMessage, ErrorMessage,
+        AuthMessage, ChannelRequestMessage, ErrorMessage,
         Message, MessageType, SetupMessage,
     },
 };
@@ -47,6 +47,8 @@ pub struct DxLinkWebSocketClient {
     connection_details: Arc<Mutex<DxLinkConnectionDetails>>,
     // Track pending channel open requests for synchronization
     pending_channel_opens: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<()>>>>,
+    // Track auth timeout for AUTH_STATE responses
+    auth_timeout: Arc<Mutex<Option<tokio::time::Instant>>>,
 }
 
 impl DxLinkWebSocketClient {
@@ -73,6 +75,7 @@ impl DxLinkWebSocketClient {
                 server_keepalive_timeout: None,
             })),
             pending_channel_opens: Arc::new(Mutex::new(HashMap::new())),
+            auth_timeout: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -444,6 +447,19 @@ impl DxLinkWebSocketClient {
             .unwrap()
             .as_millis() as u64;
         *self.last_received.lock().await = now;
+        
+        // Process AUTH_STATE messages with higher priority
+        if message.message_type() == "AUTH_STATE" && message.channel() == 0 {
+            debug!("Processing high-priority AUTH_STATE message");
+            if let Err(e) = self.process_auth_state_response(&message).await {
+                error!("Error processing AUTH_STATE response: {}", e);
+                return Err(DxLinkError::new(
+                    DxLinkErrorType::BadAction,
+                    format!("Failed to process AUTH_STATE response: {}", e),
+                ));
+            }
+            // Still continue processing normally to handle any additional logic
+        }
 
         let channel_id = message.channel();
         debug!("Checking for channel {} in channels map", channel_id);
@@ -591,32 +607,66 @@ impl DxLinkWebSocketClient {
             "AUTH_STATE" => {
                 let payload = message.payload();
                 let state = payload["state"].as_str().unwrap_or("");
+                // Clear any pending auth timeout since we received a response
+                *self.auth_timeout.lock().await = None;
+                
                 match state {
                     "AUTHORIZED" => {
                         debug!("Received AUTHORIZED state");
                         self.set_auth_state(DxLinkAuthState::Authorized);
+                        
+                        // Notify any pending channel requests if we're now authorized
+                        if *self.connection_state.lock().await == DxLinkConnectionState::Connected {
+                            for (channel_id, channel) in self.channels.lock().await.iter() {
+                                if channel.state() == DxLinkChannelState::Requested {
+                                    debug!("Sending channel request for previously requested channel {}", channel_id);
+                                    if let Err(e) = self.send_message(Box::new(MessageType::ChannelRequest(
+                                        ChannelRequestMessage {
+                                            message_type: "CHANNEL_REQUEST".to_string(),
+                                            channel: *channel_id,
+                                            service: channel.service.clone(),
+                                            parameters: Some(channel.parameters.clone()),
+                                        },
+                                    )))
+                                    .await 
+                                    {
+                                        error!("Failed to send channel request: {}", e);
+                                    }
+                                }
+                            }
+                        }
                     }
                     "UNAUTHORIZED" => {
                         debug!("Received UNAUTHORIZED state");
                         self.set_auth_state(DxLinkAuthState::Unauthorized);
                         // Clear auth token on unauthorized state
                         *self.last_auth_token.lock().await = None;
+                        
+                        // Publish an error about failed authentication
+                        self.publish_error(DxLinkError::new(
+                            DxLinkErrorType::Unauthorized,
+                            "Authentication failed".to_string(),
+                        ));
                     }
                     _ => {
                         warn!("Unknown auth state: {}", state);
-                        return Err(Box::new(DxLinkError::new(
+                        let error = DxLinkError::new(
                             DxLinkErrorType::BadAction,
                             format!("Unknown auth state: {}", state),
-                        )));
+                        );
+                        self.publish_error(error.clone());
+                        return Err(Box::new(error));
                     }
                 }
             }
             _ => {
                 warn!("Unexpected message type in process_auth_state_response");
-                return Err(Box::new(DxLinkError::new(
+                let error = DxLinkError::new(
                     DxLinkErrorType::BadAction,
-                    "Unexpected message type in auth state response",
-                )));
+                    "Unexpected message type in auth state response".to_string(),
+                );
+                self.publish_error(error.clone());
+                return Err(Box::new(error));
             }
         }
         Ok(())
@@ -703,87 +753,39 @@ impl DxLinkWebSocketClient {
             token,
         }));
 
+        // Set up auth timeout - will be checked in the message processing loop
+        *self.auth_timeout.lock().await = Some(tokio::time::Instant::now() + Duration::from_secs(5));
+
+        // Spawn a timeout handler
+        let client = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            
+            // Check if still waiting for auth response
+            let auth_state = *client.auth_state.lock().await;
+            let mut auth_timeout_lock = client.auth_timeout.lock().await;
+            
+            if auth_state == DxLinkAuthState::Authorizing && auth_timeout_lock.is_some() {
+                // Clear the timeout as we're handling it now
+                *auth_timeout_lock = None;
+                
+                // Auth timed out, set to unauthorized
+                client.set_auth_state(DxLinkAuthState::Unauthorized);
+                
+                // Publish timeout error
+                client.publish_error(DxLinkError::new(
+                    DxLinkErrorType::Timeout,
+                    "Timeout waiting for authentication response".to_string(),
+                ));
+            }
+        });
+
         self.send_message(auth_msg).await?;
 
-        // Set up a timeout for receiving AUTH_STATE response
-        let auth_timeout = tokio::time::timeout(
-            Duration::from_secs(5),
-            async {
-                loop {
-                    let message = self.connector.lock().await.as_ref().unwrap().read_next_message().await;
-                    match message {
-                        Some(Ok(msg)) => {
-                            if let Ok(parsed) = WebSocketConnector::parse_message(msg) {
-                                if parsed.message_type() == "AUTH_STATE" {
-                                    if let Some(auth_state_msg) = parsed.as_any().downcast_ref::<AuthStateMessage>() {
-                                        match auth_state_msg.state.as_str() {
-                                            "AUTHORIZED" => {
-                                                self.set_auth_state(DxLinkAuthState::Authorized);
-                                                return Ok(());
-                                            }
-                                            "UNAUTHORIZED" => {
-                                                self.set_auth_state(DxLinkAuthState::Unauthorized);
-                                                return Err(DxLinkError::new(
-                                                    DxLinkErrorType::Unauthorized,
-                                                    "Authentication failed",
-                                                ));
-                                            }
-                                            _ => {
-                                                return Err(DxLinkError::new(
-                                                    DxLinkErrorType::BadAction,
-                                                    format!("Invalid auth state: {}", auth_state_msg.state),
-                                                ));
-                                            }
-                                        }
-                                    }
-                                } else if parsed.message_type() == "ERROR" {
-                                    if let Some(error_msg) = parsed.as_any().downcast_ref::<ErrorMessage>() {
-                                        self.set_auth_state(DxLinkAuthState::Unauthorized);
-                                        return Err(DxLinkError::new(
-                                            error_msg.error,
-                                            format!("Auth error: {}", error_msg.message),
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        Some(Err(e)) => {
-                            self.set_auth_state(DxLinkAuthState::Unauthorized);
-                            return Err(DxLinkError::new(
-                                DxLinkErrorType::Unknown,
-                                format!("Error reading message: {}", e),
-                            ));
-                        }
-                        None => {
-                            self.set_auth_state(DxLinkAuthState::Unauthorized);
-                            return Err(DxLinkError::new(
-                                DxLinkErrorType::Unknown,
-                                "Connection closed before AUTH_STATE response",
-                            ));
-                        }
-                    }
-                }
-            }
-        ).await;
-
-        match auth_timeout {
-            Ok(Ok(_)) => {
-                debug!("Authentication successful");
-                Ok(())
-            }
-            Ok(Err(e)) => {
-                error!("Authentication error: {}", e);
-                Err(Box::new(e))
-            }
-            Err(_) => {
-                error!("Timeout waiting for AUTH_STATE response");
-                self.set_auth_state(DxLinkAuthState::Unauthorized);
-                Err(Box::new(DxLinkError::new(
-                    DxLinkErrorType::Timeout,
-                    "Timeout waiting for authentication response",
-                )))
-            }
-        }
+        // AUTH_STATE response will be processed by process_auth_state_response
+        // when it arrives through the normal message processing flow
+        
+        Ok(())
     }
 
     pub fn publish_error(&self, error: DxLinkError) {
@@ -1032,6 +1034,7 @@ impl Clone for DxLinkWebSocketClient {
             error_listeners: self.error_listeners.clone(),
             connection_details: self.connection_details.clone(),
             pending_channel_opens: self.pending_channel_opens.clone(),
+            auth_timeout: self.auth_timeout.clone(),
         }
     }
 }
