@@ -21,7 +21,7 @@ use crate::websocket_client::{
     connector::WebSocketConnector,
     messages::{
         AuthMessage, ChannelRequestMessage, ErrorMessage,
-        Message, MessageType, SetupMessage,
+        Message, MessageType, SetupMessage, KeepaliveMessage,
     },
 };
 
@@ -49,6 +49,7 @@ pub struct DxLinkWebSocketClient {
     pending_channel_opens: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<()>>>>,
     // Track auth timeout for AUTH_STATE responses
     auth_timeout: Arc<Mutex<Option<tokio::time::Instant>>>,
+    keepalive_timer: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl DxLinkWebSocketClient {
@@ -76,6 +77,7 @@ impl DxLinkWebSocketClient {
             })),
             pending_channel_opens: Arc::new(Mutex::new(HashMap::new())),
             auth_timeout: Arc::new(Mutex::new(None)),
+            keepalive_timer: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -148,6 +150,9 @@ impl DxLinkWebSocketClient {
         }
 
         debug!("Disconnecting");
+
+        // Stop keepalive timer
+        self.stop_keepalive_timer().await;
 
         // Stop connector
         if let Some(connector) = self.connector.lock().await.take() {
@@ -354,60 +359,6 @@ impl DxLinkWebSocketClient {
         .await?;
 
         Ok(())
-
-        // // Set up a timeout for receiving SETUP response
-        // let setup_timeout = tokio::time::timeout(
-        //     Duration::from_secs(5), // 5 second timeout for SETUP response
-        //     async {
-        //         loop {
-        //             let message = self.connector.lock().await.as_ref().unwrap().read_next_message().await;
-        //             match message {
-        //                 Some(Ok(msg)) => {
-        //                     if let Ok(parsed) = WebSocketConnector::parse_message(msg) {
-        //                         if parsed.message_type() == "SETUP" {
-        //                             return Ok(());
-        //                         } else if parsed.message_type() == "ERROR" {
-        //                             if let Some(error_msg) = parsed.as_any().downcast_ref::<ErrorMessage>() {
-        //                                 return Err(DxLinkError::new(
-        //                                     error_msg.error,
-        //                                     format!("Setup error: {}", error_msg.message),
-        //                                 ));
-        //                             }
-        //                         }
-        //                     }
-        //                 }
-        //                 Some(Err(e)) => return Err(DxLinkError::new(
-        //                     DxLinkErrorType::Unknown,
-        //                     format!("Error reading message: {}", e),
-        //                 )),
-        //                 None => return Err(DxLinkError::new(
-        //                     DxLinkErrorType::Unknown,
-        //                     "Connection closed before SETUP response",
-        //                 )),
-        //             }
-        //         }
-        //     }
-        // ).await;
-
-        // match setup_timeout {
-        //     Ok(Ok(_)) => {
-        //         debug!("Received SETUP response within timeout");
-        //         Ok(())
-        //     }
-        //     Ok(Err(e)) => {
-        //         error!("Error during SETUP: {}", e);
-        //         self.disconnect().await?;
-        //         Err(Box::new(e))
-        //     }
-        //     Err(_) => {
-        //         error!("Timeout waiting for SETUP response");
-        //         self.disconnect().await?;
-        //         Err(Box::new(DxLinkError::new(
-        //             DxLinkErrorType::Timeout,
-        //             "Timeout waiting for SETUP response",
-        //         )))
-        //     }
-        // }
     }
 
     async fn process_transport_close(
@@ -447,7 +398,7 @@ impl DxLinkWebSocketClient {
             .unwrap()
             .as_millis() as u64;
         *self.last_received.lock().await = now;
-        
+
         // Process AUTH_STATE messages with higher priority
         if message.message_type() == "AUTH_STATE" && message.channel() == 0 {
             debug!("Processing high-priority AUTH_STATE message");
@@ -594,6 +545,10 @@ impl DxLinkWebSocketClient {
 
             *self.reconnect_attempts.lock().await = 0;
             self.set_connection_state(DxLinkConnectionState::Connected);
+            
+            // Start keepalive timer after successful setup
+            debug!("Starting keepalive timer with interval {:?}", self.config.keepalive_interval);
+            self.start_keepalive_timer().await;
         }
 
         Ok(())
@@ -609,12 +564,12 @@ impl DxLinkWebSocketClient {
                 let state = payload["state"].as_str().unwrap_or("");
                 // Clear any pending auth timeout since we received a response
                 *self.auth_timeout.lock().await = None;
-                
+
                 match state {
                     "AUTHORIZED" => {
                         debug!("Received AUTHORIZED state");
                         self.set_auth_state(DxLinkAuthState::Authorized);
-                        
+
                         // Notify any pending channel requests if we're now authorized
                         if *self.connection_state.lock().await == DxLinkConnectionState::Connected {
                             for (channel_id, channel) in self.channels.lock().await.iter() {
@@ -628,7 +583,7 @@ impl DxLinkWebSocketClient {
                                             parameters: Some(channel.parameters.clone()),
                                         },
                                     )))
-                                    .await 
+                                    .await
                                     {
                                         error!("Failed to send channel request: {}", e);
                                     }
@@ -641,12 +596,6 @@ impl DxLinkWebSocketClient {
                         self.set_auth_state(DxLinkAuthState::Unauthorized);
                         // Clear auth token on unauthorized state
                         *self.last_auth_token.lock().await = None;
-                        
-                        // Publish an error about failed authentication
-                        self.publish_error(DxLinkError::new(
-                            DxLinkErrorType::Unauthorized,
-                            "Authentication failed".to_string(),
-                        ));
                     }
                     _ => {
                         warn!("Unknown auth state: {}", state);
@@ -760,18 +709,18 @@ impl DxLinkWebSocketClient {
         let client = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            
+
             // Check if still waiting for auth response
             let auth_state = *client.auth_state.lock().await;
             let mut auth_timeout_lock = client.auth_timeout.lock().await;
-            
+
             if auth_state == DxLinkAuthState::Authorizing && auth_timeout_lock.is_some() {
                 // Clear the timeout as we're handling it now
                 *auth_timeout_lock = None;
-                
+
                 // Auth timed out, set to unauthorized
                 client.set_auth_state(DxLinkAuthState::Unauthorized);
-                
+
                 // Publish timeout error
                 client.publish_error(DxLinkError::new(
                     DxLinkErrorType::Timeout,
@@ -784,7 +733,7 @@ impl DxLinkWebSocketClient {
 
         // AUTH_STATE response will be processed by process_auth_state_response
         // when it arrives through the normal message processing flow
-        
+
         Ok(())
     }
 
@@ -893,128 +842,43 @@ impl DxLinkWebSocketClient {
             }
         }
     }
+
+    async fn start_keepalive_timer(&self) {
+        // Stop existing timer if any
+        self.stop_keepalive_timer().await;
+
+        let interval = self.config.keepalive_interval;
+        let client = self.clone();
+
+        let timer_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(interval);
+            loop {
+                interval.tick().await;
+                
+                // Only send keepalive if connected
+                if *client.connection_state.lock().await == DxLinkConnectionState::Connected {
+                    debug!("Sending KEEPALIVE message");
+                    let keepalive_msg = MessageType::KeepAlive(KeepaliveMessage {
+                        message_type: "KEEPALIVE".to_string(),
+                        channel: 0,
+                    });
+                    if let Err(e) = client.send_message(Box::new(keepalive_msg)).await {
+                        error!("Failed to send keepalive message: {}", e);
+                    }
+                }
+            }
+        });
+
+        *self.keepalive_timer.lock().await = Some(timer_handle);
+    }
+
+    async fn stop_keepalive_timer(&self) {
+        if let Some(timer) = self.keepalive_timer.lock().await.take() {
+            debug!("Stopping keepalive timer");
+            timer.abort();
+        }
+    }
 }
-
-// #[async_trait]
-// impl DxLinkClient for DxLinkWebSocketClient {
-    // async fn connect(&mut self, url: String) {
-    //     if let Err(e) = DxLinkWebSocketClient::connect(self, url).await {
-    //         error!("Failed to connect: {}", e);
-    //     }
-    // }
-
-    // async fn reconnect(&mut self) {
-    //     if let Err(e) = DxLinkWebSocketClient::reconnect(self).await {
-    //         error!("Failed to reconnect: {}", e);
-    //     }
-    // }
-
-    // async fn disconnect(&mut self) {
-    //     if let Err(e) = DxLinkWebSocketClient::disconnect(self).await {
-    //         error!("Failed to disconnect: {}", e);
-    //     }
-    // }
-
-    // async fn get_connection_state(&self) -> DxLinkConnectionState {
-    //     *self.connection_state.lock().await
-    // }
-
-    // async fn get_auth_state(&self) -> DxLinkAuthState {
-    //     *self.auth_state.lock().await
-    // }
-
-    // async fn add_connection_state_change_listener(
-    //     &mut self,
-    //     listener: ConnectionStateChangeListener,
-    // ) {
-    //     let id = Uuid::new_v4();
-    //     self.connection_state_listeners
-    //         .lock()
-    //         .await
-    //         .insert(id, listener);
-    // }
-
-    // async fn add_auth_state_change_listener(&mut self, listener: AuthStateChangeListener) {
-    //     let id = Uuid::new_v4();
-    //     self.auth_state_listeners.lock().await.insert(id, listener);
-    // }
-
-    // async fn add_error_listener(&mut self, listener: ErrorListener) {
-    //     let id = Uuid::new_v4();
-    //     self.error_listeners.lock().await.insert(id, listener);
-    // }
-
-    // async fn get_connection_details(&self) -> &DxLinkConnectionDetails {
-    //     let details = self.connection_details.lock().await;
-    //     // TODO: this is not ideal, fix it later
-    //     Box::leak(Box::new(details.clone()))
-    // }
-
-    // async fn remove_connection_state_change_listener(
-    //     &mut self,
-    //     _listener: ConnectionStateChangeListener,
-    // ) {
-    //     // TODO: Implement removal by comparing function pointers or using an ID system
-    // }
-
-    // async fn set_auth_token(&mut self, token: String) {
-    //     let client = self.clone();
-    //     tokio::spawn(async move {
-    //         if let Err(e) = client.set_auth_token(token).await {
-    //             error!("Failed to set auth token: {}", e);
-    //         }
-    //     });
-    // }
-
-    // async fn remove_auth_state_change_listener(&mut self, _listener: AuthStateChangeListener) {
-    //     // TODO: Implement removal by comparing function pointers or using an ID system
-    // }
-
-    // async fn remove_error_listener(&mut self, _listener: ErrorListener) {
-    //     // TODO: Implement removal by comparing function pointers or using an ID system
-    // }
-
-    // // async fn open_channel(
-    // //     &mut self,
-    // //     service: String,
-    // //     parameters: HashMap<String, Value>,
-    // // ) -> Box<dyn DxLinkChannel + Send + Sync> {
-    // //     match DxLinkWebSocketClient::open_channel(
-    // //         self,
-    // //         service,
-    // //         serde_json::to_value(parameters).unwrap(),
-    // //     )
-    // //     .await
-    // //     {
-    // //         Ok(channel) => Box::new(channel),
-    // //         Err(e) => {
-    // //             error!("Failed to open channel: {}", e);
-    // //             panic!("Failed to open channel: {}", e); // TODO: Better error handling
-    // //         }
-    // //     }
-    // // }
-
-    // async fn open_channel(
-    //     &mut self,
-    //     service: String,
-    //     parameters: serde_json::Value,
-    // ) -> Box<dyn DxLinkChannel + Send + Sync> {
-    //     debug!("Opening channel in DxLinkClient implementation with service: {}", service);
-    //     match self.open_channel_internal(service, parameters).await {
-    //         Ok(channel) => Box::new(channel),
-    //         Err(e) => {
-    //             error!("Failed to open channel: {}", e);
-    //             panic!("Failed to open channel: {}", e); // TODO: Better error handling
-    //         }
-    //     }
-    // }
-
-    // async fn close(&mut self) {
-    //     if let Err(e) = DxLinkWebSocketClient::disconnect(self).await {
-    //         error!("Failed to close: {}", e);
-    //     }
-    // }
-// }
 
 impl Clone for DxLinkWebSocketClient {
     fn clone(&self) -> Self {
@@ -1035,6 +899,7 @@ impl Clone for DxLinkWebSocketClient {
             connection_details: self.connection_details.clone(),
             pending_channel_opens: self.pending_channel_opens.clone(),
             auth_timeout: self.auth_timeout.clone(),
+            keepalive_timer: self.keepalive_timer.clone(),
         }
     }
 }

@@ -17,9 +17,9 @@ const DEMO_DXLINK_WS_URL: &str = "wss://demo.dxfeed.com/dxlink-ws";
 async fn test_feed_lifecycle() {
     // Create a WebSocket client
     let config = DxLinkWebSocketClientConfig {
-        keepalive_interval: Duration::from_secs(30),
-        keepalive_timeout: Duration::from_secs(10),
-        accept_keepalive_timeout: Duration::from_secs(10),
+        keepalive_interval: Duration::from_secs(10),
+        keepalive_timeout: Duration::from_secs(60),
+        accept_keepalive_timeout: Duration::from_secs(60),
         action_timeout: Duration::from_secs(30),
         log_level: DxLinkLogLevel::Info,
         max_reconnect_attempts: 3,
@@ -69,9 +69,9 @@ async fn test_feed_lifecycle() {
 async fn test_feed_data_handling() {
     // Create a WebSocket client
     let config = DxLinkWebSocketClientConfig {
-        keepalive_interval: Duration::from_secs(30),
+        keepalive_interval: Duration::from_secs(9),
         keepalive_timeout: Duration::from_secs(10),
-        accept_keepalive_timeout: Duration::from_secs(10),
+        accept_keepalive_timeout: Duration::from_secs(60),
         action_timeout: Duration::from_secs(30),
         log_level: DxLinkLogLevel::Info,
         max_reconnect_attempts: 3,
@@ -125,9 +125,9 @@ async fn test_feed_data_handling() {
 async fn test_feed_config_handling() {
     // Create a WebSocket client
     let config = DxLinkWebSocketClientConfig {
-        keepalive_interval: Duration::from_secs(30),
+        keepalive_interval: Duration::from_secs(9),
         keepalive_timeout: Duration::from_secs(10),
-        accept_keepalive_timeout: Duration::from_secs(10),
+        accept_keepalive_timeout: Duration::from_secs(60),
         action_timeout: Duration::from_secs(30),
         log_level: DxLinkLogLevel::Info,
         max_reconnect_attempts: 3,
@@ -225,7 +225,7 @@ async fn test_feed_subscription_lifecycle() {
 
     // Create a WebSocket client
     let config = DxLinkWebSocketClientConfig {
-        keepalive_interval: Duration::from_secs(30),
+        keepalive_interval: Duration::from_secs(5),
         keepalive_timeout: Duration::from_secs(10),
         accept_keepalive_timeout: Duration::from_secs(10),
         action_timeout: Duration::from_secs(30),
@@ -246,15 +246,15 @@ async fn test_feed_subscription_lifecycle() {
     while attempts < max_attempts {
         let client_state = client.lock().await.get_connection_state().await;
         let auth_state = client.lock().await.get_auth_state().await;
-        
+
         if client_state == DxLinkConnectionState::Connected && auth_state == DxLinkAuthState::Authorized {
             break;
         }
-        
+
         tokio::time::sleep(Duration::from_millis(100)).await;
         attempts += 1;
     }
-    
+
     assert!(attempts < max_attempts, "Failed to reach Connected and Authorized state");
 
     // Create a feed service
@@ -306,7 +306,7 @@ async fn test_feed_subscription_lifecycle() {
     while !received_data && attempts < max_attempts {
         attempts += 1;
         tracing::info!("Attempt {} of {} to receive feed data", attempts, max_attempts);
-        
+
         let result = timeout(TokioDuration::from_secs(10), rx.recv()).await;
         if let Ok(Ok(event)) = result {
             match event {

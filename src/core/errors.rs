@@ -8,16 +8,22 @@ use std::fmt;
 #[serde(rename_all = "snake_case")]
 pub enum DxLinkErrorType {
     /// An unknown error occurred
+    #[serde(alias = "UNKNOWN")]
     Unknown,
     /// The protocol version is not supported
+    #[serde(alias = "UNSUPPORTED_PROTOCOL")]
     UnsupportedProtocol,
     /// A timeout occurred while waiting for a response
+    #[serde(alias = "TIMEOUT")]
     Timeout,
     /// Authentication failed
+    #[serde(alias = "UNAUTHORIZED")]
     Unauthorized,
     /// Received message could not be parsed
+    #[serde(alias = "INVALID_MESSAGE")]
     InvalidMessage,
     /// The requested action is not valid
+    #[serde(alias = "BAD_ACTION")]
     BadAction,
 }
 
