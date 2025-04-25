@@ -109,17 +109,21 @@ impl WebSocketConnector {
         message: Box<dyn Message + Send + Sync>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if !*self.is_available.lock().await {
+            tracing::warn!("WebSocket not available for sending message");
             return Ok(());
         }
 
-        let json = serde_json::to_string(&message.payload())?;
-        debug!("Sending WebSocket message: {}", json);
+        let payload = message.payload();
+        let json = serde_json::to_string(&payload)?;
+        tracing::info!("Sending WebSocket message type: {}, channel: {}", message.message_type(), message.channel());
+        tracing::info!("Raw message payload: {}", json);
 
         if let Some(write) = self.write_stream.lock().await.as_mut() {
+            tracing::debug!("Writing message to WebSocket stream");
             write.send(WsMessage::Text(json)).await?;
-            debug!("Message sent successfully");
+            tracing::info!("Successfully sent message over WebSocket");
         } else {
-            warn!("No write stream available");
+            tracing::warn!("No write stream available");
         }
 
         Ok(())

@@ -60,6 +60,7 @@ impl From<serde_json::Error> for DxLinkError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedSubscriptionEntry {
     /// Event type (e.g., "Quote", "Trade", "Candle")
+    #[serde(rename = "type")]
     pub r#type: String,
     /// Symbol to subscribe to (e.g., "AAPL")
     pub symbol: String,
@@ -67,7 +68,7 @@ pub struct FeedSubscriptionEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// Timestamp from when we want the data (optional)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "fromTime", skip_serializing_if = "Option::is_none")]
     pub from_time: Option<u64>,
 }
 
@@ -155,7 +156,10 @@ impl Message for FeedSubscriptionMessage {
         self.channel
     }
     fn payload(&self) -> Value {
-        serde_json::to_value(self).unwrap()
+        tracing::debug!("Converting FeedSubscriptionMessage to payload: {:?}", self);
+        let payload = serde_json::to_value(self).unwrap();
+        tracing::debug!("Converted payload: {:?}", payload);
+        payload
     }
 }
 
@@ -282,16 +286,23 @@ impl FeedData {
 
                     // Construct JSON object with field names and values
                     let mut obj = serde_json::Map::new();
+                    
+                    // Always set eventType first
                     obj.insert("eventType".to_string(), Value::String(event_type.clone()));
 
-                    for (i, value) in values.iter().enumerate() {
-                        if i < field_names.len() {
-                            obj.insert(field_names[i].clone(), value.clone());
+                    // Then process fields in order
+                    for (i, field_name) in field_names.iter().enumerate() {
+                        if i < values.len() {
+                            // Skip eventType as we've already set it
+                            if field_name != "eventType" {
+                                obj.insert(field_name.clone(), values[i].clone());
+                            }
                         }
                     }
 
                     // Deserialize as FeedEvent
                     let event_value = Value::Object(obj);
+                    tracing::debug!("Converting compact event to full: {:?}", event_value);
                     match serde_json::from_value::<FeedEvent>(event_value) {
                         Ok(event) => full_events.push(event),
                         Err(err) => return Err(DxLinkError {
@@ -858,5 +869,59 @@ mod tests {
         assert_eq!(msg.aggregation_period, 1000.0);
         assert_eq!(msg.data_format, FeedDataFormat::Full);
         assert_eq!(msg.event_fields, None);
+    }
+
+    #[test]
+    fn test_compact_to_full_field_order() {
+        let mut event_fields = FeedEventFields::new();
+        event_fields.insert("Quote".to_string(), vec![
+            "eventSymbol".to_string(),
+            "eventType".to_string(),
+            "bidPrice".to_string(),
+            "askPrice".to_string(),
+            "bidSize".to_string(),
+            "askSize".to_string(),
+        ]);
+
+        let compact_data = FeedData::Compact(vec![
+            ("Quote".to_string(), vec![
+                Value::String("AAPL".to_string()),
+                Value::String("Quote".to_string()),
+                Value::Number(Number::from_f64(123.45).unwrap()),
+                Value::Number(Number::from_f64(123.46).unwrap()),
+                Value::Number(Number::from_f64(100.0).unwrap()),
+                Value::Number(Number::from_f64(200.0).unwrap()),
+            ])
+        ]);
+
+        let full_events = compact_data.compact_to_full(&event_fields).unwrap();
+        assert_eq!(full_events.len(), 1);
+
+        if let FeedEvent::Quote(quote) = &full_events[0] {
+            assert_eq!(quote.event_symbol, "AAPL");
+            assert!(matches!(quote.bid_price, Some(JSONDouble::Number(n)) if n == 123.45));
+            assert!(matches!(quote.ask_price, Some(JSONDouble::Number(n)) if n == 123.46));
+            assert!(matches!(quote.bid_size, Some(JSONDouble::Number(n)) if n == 100.0));
+            assert!(matches!(quote.ask_size, Some(JSONDouble::Number(n)) if n == 200.0));
+
+            // Convert back to JSON to verify field order
+            let json = serde_json::to_value(quote).unwrap();
+            let obj = json.as_object().unwrap();
+            let mut fields: Vec<_> = obj.keys().collect();
+            fields.sort();
+            assert_eq!(fields, vec![
+                "askPrice",
+                "askSize",
+                "bidPrice",
+                "bidSize",
+                "eventSymbol",
+                "eventTime",
+                "eventType",
+                "sequence",
+                "timeNanoPart",
+            ]);
+        } else {
+            panic!("Expected Quote event");
+        }
     }
 }

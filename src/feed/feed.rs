@@ -77,9 +77,9 @@ pub struct Feed {
     /// Options for batching and chunking
     options: FeedOptions,
     /// Event sender for subscription changes
-    event_tx: mpsc::Sender<FeedEvent>,
+    event_tx: Arc<Mutex<mpsc::Sender<FeedEvent>>>,
     /// Event receiver for subscription changes
-    event_rx: mpsc::Receiver<FeedEvent>,
+    event_rx: Arc<Mutex<mpsc::Receiver<FeedEvent>>>,
     /// Sender for feed data events
     data_tx: broadcast::Sender<crate::feed::events::FeedEvent>,
     /// Receiver for feed data events
@@ -103,9 +103,11 @@ impl Feed {
         options: Option<FeedOptions>,
         data_format: Option<FeedDataFormat>,
     ) -> Result<Self> {
+        tracing::info!("Creating new Feed instance");
         let (event_tx, event_rx) = mpsc::channel(32);
         let (data_tx, data_rx) = broadcast::channel(100);
         let options = options.unwrap_or_default();
+        tracing::debug!("Feed options: {:?}", options);
 
         let parameters = serde_json::to_value(FeedParameters { contract })?;
         let channel = client.lock().await.open_channel(
@@ -121,11 +123,13 @@ impl Feed {
 
         // Channel message listener - reads message type from DxLinkChannelMessage
         channel.add_message_listener(Box::new(move |message| {
+            tracing::debug!("Received channel message: {:?}", message);
             // In the websocket client, message is a DxLinkChannelMessage
             // Extract type and payload from it
             if let Ok(value) = serde_json::from_value::<serde_json::Value>(message.payload.clone()) {
                 if let Some(type_value) = value.get("type") {
                     if let Some(type_str) = type_value.as_str() {
+                        tracing::debug!("Processing message type: {}", type_str);
                         if type_str == "FEED_CONFIG" {
                             // Parse the message payload as FeedConfigMessage
                             if let Ok(feed_config) = serde_json::from_value::<FeedConfigMessage>(message.payload.clone()) {
@@ -142,6 +146,7 @@ impl Feed {
                                 });
                             }
                         } else if type_str == "FEED_DATA" {
+                            tracing::info!("Received FEED_DATA message: {:?}", value);
                             // Parse the message payload as FeedDataMessage
                             if let Ok(feed_data) = serde_json::from_value::<FeedDataMessage>(message.payload.clone()) {
                                 tokio::spawn({
@@ -151,17 +156,22 @@ impl Feed {
                                         let config = config_ref.lock().await.clone();
                                         match &feed_data.data {
                                             FeedData::Full(events) => {
+                                                tracing::info!("Processing {} full format events", events.len());
                                                 // Forward each event to listeners
                                                 for event in events {
+                                                    tracing::debug!("Forwarding event: {:?}", event);
                                                     let _ = data_tx.send(event.clone());
                                                 }
                                             },
                                             FeedData::Compact(_data) => {
+                                                tracing::info!("Processing compact format data");
                                                 // Process compact data if we have event fields configuration
                                                 if let Some(ref fields) = config.event_fields {
                                                     match feed_data.data.compact_to_full(fields) {
                                                         Ok(events) => {
+                                                            tracing::info!("Converted compact data to {} events", events.len());
                                                             for event in events {
+                                                                tracing::debug!("Forwarding event: {:?}", event);
                                                                 let _ = data_tx.send(event);
                                                             }
                                                         },
@@ -176,6 +186,8 @@ impl Feed {
                                         }
                                     }
                                 });
+                            } else {
+                                tracing::error!("Failed to parse FEED_DATA message: {:?}", value);
                             }
                         }
                     }
@@ -194,12 +206,13 @@ impl Feed {
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             touched_events: Arc::new(Mutex::new(HashSet::new())),
             options,
-            event_tx,
-            event_rx,
+            event_tx: Arc::new(Mutex::new(event_tx)),
+            event_rx: Arc::new(Mutex::new(event_rx)),
             data_tx,
             data_rx,
         };
 
+        tracing::info!("Feed instance created successfully");
         // Start event processing loop
         feed.start_event_loop();
 
@@ -211,29 +224,40 @@ impl Feed {
 
     /// Configure the feed service
     pub async fn configure(&self, config: FeedAcceptConfig) -> Result<()> {
-        self.event_tx.send(FeedEvent::Configure(config)).await?;
+        tracing::info!("Sending Configure event with config: {:?}", config);
+        let mut tx = self.event_tx.lock().await;
+        tx.send(FeedEvent::Configure(config)).await?;
+        tracing::info!("Successfully sent Configure event");
         Ok(())
     }
 
     /// Add subscriptions
     pub async fn add_subscriptions(&self, subscriptions: Vec<Value>) -> Result<()> {
-        self.event_tx
-            .send(FeedEvent::Subscribe(subscriptions))
-            .await?;
+        tracing::info!("Adding {} subscriptions to feed", subscriptions.len());
+        tracing::debug!("Subscription details: {:?}", subscriptions);
+        let event = FeedEvent::Subscribe(subscriptions);
+        tracing::info!("Sending Subscribe event: {:?}", event);
+        let mut tx = self.event_tx.lock().await;
+        tx.send(event).await?;
+        tracing::info!("Successfully sent subscription event to channel");
         Ok(())
     }
 
     /// Remove subscriptions
     pub async fn remove_subscriptions(&self, subscriptions: Vec<Value>) -> Result<()> {
-        self.event_tx
-            .send(FeedEvent::Unsubscribe(subscriptions))
-            .await?;
+        tracing::info!("Sending Unsubscribe event for {} subscriptions", subscriptions.len());
+        let mut tx = self.event_tx.lock().await;
+        tx.send(FeedEvent::Unsubscribe(subscriptions)).await?;
+        tracing::info!("Successfully sent Unsubscribe event");
         Ok(())
     }
 
     /// Clear all subscriptions
     pub async fn clear_subscriptions(&self) -> Result<()> {
-        self.event_tx.send(FeedEvent::Reset).await?;
+        tracing::info!("Sending Reset event");
+        let mut tx = self.event_tx.lock().await;
+        tx.send(FeedEvent::Reset).await?;
+        tracing::info!("Successfully sent Reset event");
         Ok(())
     }
 
@@ -280,35 +304,83 @@ impl Feed {
 
     fn start_event_loop(&self) {
         let feed = self.clone();
+        tracing::info!("Starting feed event processing loop");
         tokio::spawn(async move {
-            if let Err(e) = feed.process_events().await {
-                tracing::error!("Event processing loop failed: {}", e);
+            tracing::info!("Event loop task started");
+            match feed.process_events().await {
+                Ok(_) => tracing::info!("Event loop completed successfully"),
+                Err(e) => tracing::error!("Event processing loop failed: {}", e),
             }
+            tracing::info!("Event loop task ended");
         });
     }
 
-    async fn process_events(mut self) -> Result<()> {
-        while let Some(event) = self.event_rx.recv().await {
+    async fn process_events(&self) -> Result<()> {
+        tracing::info!("Feed event processing loop started");
+        let mut event_count = 0;
+        
+        loop {
+            tracing::debug!("Waiting for next event... (event count: {})", event_count);
+            
+            // Get the next event
+            let event = {
+                let mut rx = self.event_rx.lock().await;
+                match rx.recv().await {
+                    Some(event) => {
+                        tracing::debug!("Received raw event from channel");
+                        event
+                    },
+                    None => {
+                        tracing::warn!("Event channel closed, exiting event loop");
+                        break;
+                    }
+                }
+            };
+
+            event_count += 1;
+            let event_type = match &event {
+                FeedEvent::Subscribe(_) => "Subscribe",
+                FeedEvent::Unsubscribe(_) => "Unsubscribe",
+                FeedEvent::Reset => "Reset",
+                FeedEvent::Configure(_) => "Configure",
+            };
+            tracing::info!("Processing {} event in processing loop (event #{})", event_type, event_count);
+
             match event {
                 FeedEvent::Subscribe(subs) => {
+                    tracing::info!("Processing Subscribe event with {} subscriptions", subs.len());
+                    let start_time = std::time::Instant::now();
                     self.handle_subscribe(subs).await;
+                    tracing::info!("Completed Subscribe event processing in {:?}", start_time.elapsed());
                 }
                 FeedEvent::Unsubscribe(subs) => {
+                    tracing::info!("Processing Unsubscribe event with {} subscriptions", subs.len());
+                    let start_time = std::time::Instant::now();
                     self.handle_unsubscribe(subs).await;
+                    tracing::info!("Completed Unsubscribe event processing in {:?}", start_time.elapsed());
                 }
                 FeedEvent::Reset => {
+                    tracing::info!("Processing Reset event");
+                    let start_time = std::time::Instant::now();
                     self.handle_reset().await;
+                    tracing::info!("Completed Reset event processing in {:?}", start_time.elapsed());
                 }
                 FeedEvent::Configure(config) => {
+                    tracing::info!("Processing Configure event with config: {:?}", config);
+                    let start_time = std::time::Instant::now();
                     self.handle_configure(config).await;
+                    tracing::info!("Completed Configure event processing in {:?}", start_time.elapsed());
                 }
             }
         }
+        tracing::info!("Feed event processing loop ended after processing {} events", event_count);
         Ok(())
     }
 
     async fn handle_subscribe(&self, subscriptions: Vec<Value>) {
+        tracing::info!("Starting handle_subscribe with {} subscriptions", subscriptions.len());
         if self.channel.state() != DxLinkChannelState::Opened {
+            tracing::warn!("Cannot handle subscription - channel not in Opened state");
             return;
         }
 
@@ -317,15 +389,22 @@ impl Feed {
         let mut added = Vec::new();
         for sub in subscriptions {
             if let Some(key) = self.subscription_key(&sub) {
+                let key_clone = key.clone();
                 subs.insert(key, sub.clone());
                 added.push(sub);
+                tracing::debug!("Added subscription with key: {}", key_clone);
+            } else {
+                tracing::warn!("Failed to generate key for subscription: {:?}", sub);
             }
         }
         drop(subs); // Release the lock before async call
 
         // Send only the added subscriptions without reset flag
         if !added.is_empty() {
+            tracing::info!("Sending {} new subscriptions via send_subscription_add", added.len());
             self.send_subscription_add(added).await;
+        } else {
+            tracing::warn!("No valid subscriptions to send");
         }
     }
 
@@ -382,18 +461,32 @@ impl Feed {
 
     async fn send_subscription_add(&self, subscriptions: Vec<Value>) {
         if subscriptions.is_empty() {
+            tracing::warn!("Attempted to send empty subscription list");
             return;
         }
+
+        tracing::debug!("Starting subscription message construction with {} subscriptions", subscriptions.len());
+        tracing::debug!("Raw subscription values: {:?}", subscriptions);
 
         // Convert from Value to FeedSubscriptionEntry if needed
         let entries: Vec<FeedSubscriptionEntry> = subscriptions
             .iter()
-            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+            .filter_map(|v| {
+                let result = serde_json::from_value(v.clone());
+                if let Err(e) = &result {
+                    tracing::warn!("Failed to convert subscription value: {:?}, error: {}", v, e);
+                }
+                result.ok()
+            })
             .collect();
 
         if entries.is_empty() {
+            tracing::warn!("No valid subscription entries after conversion");
             return;
         }
+
+        tracing::debug!("Converted {} entries to FeedSubscriptionEntry format", entries.len());
+        tracing::debug!("Converted entries: {:?}", entries);
 
         let msg = FeedSubscriptionMessage {
             message_type: "FEED_SUBSCRIPTION".into(),
@@ -403,14 +496,21 @@ impl Feed {
             reset: None,
         };
 
+        tracing::debug!("Constructed FeedSubscriptionMessage: {:?}", msg);
+
         // Convert to DxLinkChannelMessage format expected by channel.send
         let channel_msg = DxLinkChannelMessage {
             message_type: msg.message_type().to_string(),
             payload: serde_json::to_value(&msg).unwrap(),
         };
 
+        tracing::debug!("Converted to DxLinkChannelMessage: {:?}", channel_msg);
+        tracing::info!("Sending subscription message to channel {}: {:?}", self.channel.id, channel_msg);
+
         if let Err(e) = self.channel.send(channel_msg).await {
             tracing::error!("Failed to send subscription add: {}", e);
+        } else {
+            tracing::info!("Successfully sent subscription message to channel {}", self.channel.id);
         }
     }
 
@@ -547,30 +647,48 @@ impl Feed {
 
     /// Handle an incoming feed data message
     async fn handle_feed_data(&self, message: FeedDataMessage) {
+        tracing::info!("Received feed data message: {:?}", message);
         let config = self.config.lock().await.clone();
 
         match &message.data {
             FeedData::Full(events) => {
+                tracing::info!("Processing {} full format events", events.len());
                 // Forward each event to listeners
                 for event in events {
+                    tracing::debug!("Forwarding full format event: {:?}", event);
                     let _ = self.data_tx.send(event.clone());
                 }
             },
-            FeedData::Compact(_data) => {
+            FeedData::Compact(data) => {
+                tracing::info!("Processing compact format data with {} event types", data.len());
                 // Process compact data if we have event fields configuration
                 if let Some(ref fields) = config.event_fields {
+                    tracing::debug!("Event fields configuration: {:?}", fields);
+                    for (event_type, values) in data {
+                        tracing::debug!("Converting compact data for event type {}: {:?}", event_type, values);
+                        if let Some(field_names) = fields.get(event_type) {
+                            tracing::debug!("Found field names for {}: {:?}", event_type, field_names);
+                        } else {
+                            tracing::warn!("No field names found for event type: {}", event_type);
+                        }
+                    }
                     match message.data.compact_to_full(fields) {
                         Ok(events) => {
+                            tracing::info!("Successfully converted compact data to {} events", events.len());
                             for event in events {
+                                tracing::debug!("Forwarding converted event: {:?}", event);
                                 let _ = self.data_tx.send(event);
                             }
                         },
                         Err(e) => {
                             tracing::error!("Failed to convert compact data to full format: {}", e);
+                            tracing::error!("Compact data was: {:?}", data);
+                            tracing::error!("Event fields were: {:?}", fields);
                         }
                     }
                 } else {
                     tracing::error!("Received compact data but no event fields configuration available");
+                    tracing::error!("Compact data was: {:?}", data);
                 }
             }
         }
@@ -579,7 +697,6 @@ impl Feed {
 
 impl Clone for Feed {
     fn clone(&self) -> Self {
-        let (tx, rx) = mpsc::channel(32);
         let (data_tx, data_rx) = broadcast::channel(100);
         Self {
             channel: self.channel.clone(),
@@ -588,8 +705,8 @@ impl Clone for Feed {
             subscriptions: self.subscriptions.clone(),
             touched_events: self.touched_events.clone(),
             options: self.options.clone(),
-            event_tx: tx,
-            event_rx: rx,
+            event_tx: self.event_tx.clone(),  // Use the same sender
+            event_rx: self.event_rx.clone(),  // Use the same receiver
             data_tx,
             data_rx
         }
@@ -631,8 +748,8 @@ mod tests {
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             touched_events: Arc::new(Mutex::new(HashSet::new())),
             options: FeedOptions::default(),
-            event_tx: tokio::sync::mpsc::channel(32).0,
-            event_rx: tokio::sync::mpsc::channel(32).1,
+            event_tx: Arc::new(Mutex::new(tokio::sync::mpsc::channel(32).0)),
+            event_rx: Arc::new(Mutex::new(tokio::sync::mpsc::channel(32).1)),
             data_tx,
             data_rx,
         };
@@ -669,8 +786,8 @@ mod tests {
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             touched_events: Arc::new(Mutex::new(HashSet::new())),
             options: FeedOptions::default(),
-            event_tx,
-            event_rx,
+            event_tx: Arc::new(Mutex::new(event_tx)),
+            event_rx: Arc::new(Mutex::new(event_rx)),
             data_tx,
             data_rx,
         };
@@ -715,8 +832,8 @@ mod tests {
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             touched_events: Arc::new(Mutex::new(HashSet::new())),
             options: FeedOptions::default(),
-            event_tx,
-            event_rx,
+            event_tx: Arc::new(Mutex::new(event_tx)),
+            event_rx: Arc::new(Mutex::new(event_rx)),
             data_tx,
             data_rx
         };
@@ -743,8 +860,8 @@ mod tests {
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             touched_events: Arc::new(Mutex::new(HashSet::new())),
             options: FeedOptions::default(),
-            event_tx: event_tx.clone(),
-            event_rx: tokio::sync::mpsc::channel(32).1, // Don't use the real receiver
+            event_tx: Arc::new(Mutex::new(event_tx.clone())),
+            event_rx: Arc::new(Mutex::new(tokio::sync::mpsc::channel(32).1)), // Don't use the real receiver
             data_tx,
             data_rx
         };
@@ -756,21 +873,33 @@ mod tests {
         feed.add_subscriptions(vec![sub1.clone(), sub2.clone()])
             .await
             .unwrap();
-        let received_event = event_tx
+        let received_event = feed.event_tx
+            .lock()
+            .await
             .send(super::FeedEvent::Subscribe(vec![sub1.clone(), sub2.clone()]))
             .await;
         assert!(received_event.is_ok());
 
         // remove
-        feed.remove_subscriptions(vec![sub1.clone()]).await.unwrap();
-        let received_event = event_tx
+        feed.remove_subscriptions(vec![sub1.clone()])
+            .await
+            .unwrap();
+        let received_event = feed.event_tx
+            .lock()
+            .await
             .send(super::FeedEvent::Unsubscribe(vec![sub1.clone()]))
             .await;
         assert!(received_event.is_ok());
 
         // Clear.
-        feed.clear_subscriptions().await.unwrap();
-        let received_event = event_tx.send(super::FeedEvent::Reset).await;
+        feed.clear_subscriptions()
+            .await
+            .unwrap();
+        let received_event = feed.event_tx
+            .lock()
+            .await
+            .send(super::FeedEvent::Reset)
+            .await;
         assert!(received_event.is_ok());
     }
 
@@ -827,8 +956,8 @@ mod tests {
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             touched_events: Arc::new(Mutex::new(HashSet::new())),
             options: FeedOptions::default(),
-            event_tx: tokio::sync::mpsc::channel(32).0,
-            event_rx: tokio::sync::mpsc::channel(32).1,
+            event_tx: Arc::new(Mutex::new(tokio::sync::mpsc::channel(32).0)),
+            event_rx: Arc::new(Mutex::new(tokio::sync::mpsc::channel(32).1)),
             data_tx,
             data_rx,
         };
@@ -876,8 +1005,8 @@ mod tests {
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             touched_events: Arc::new(Mutex::new(HashSet::new())),
             options: FeedOptions::default(),
-            event_tx: tokio::sync::mpsc::channel(32).0,
-            event_rx: tokio::sync::mpsc::channel(32).1,
+            event_tx: Arc::new(Mutex::new(tokio::sync::mpsc::channel(32).0)),
+            event_rx: Arc::new(Mutex::new(tokio::sync::mpsc::channel(32).1)),
             data_tx,
             data_rx,
         };
@@ -922,8 +1051,8 @@ mod tests {
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             touched_events: Arc::new(Mutex::new(HashSet::new())),
             options: FeedOptions::default(),
-            event_tx: tokio::sync::mpsc::channel(32).0,
-            event_rx: tokio::sync::mpsc::channel(32).1,
+            event_tx: Arc::new(Mutex::new(tokio::sync::mpsc::channel(32).0)),
+            event_rx: Arc::new(Mutex::new(tokio::sync::mpsc::channel(32).1)),
             data_tx: data_tx.clone(),
             data_rx,
         };
@@ -1000,8 +1129,8 @@ mod tests {
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             touched_events: Arc::new(Mutex::new(HashSet::new())),
             options: FeedOptions::default(),
-            event_tx: tokio::sync::mpsc::channel(32).0,
-            event_rx: tokio::sync::mpsc::channel(32).1,
+            event_tx: Arc::new(Mutex::new(tokio::sync::mpsc::channel(32).0)),
+            event_rx: Arc::new(Mutex::new(tokio::sync::mpsc::channel(32).1)),
             data_tx: data_tx.clone(),
             data_rx,
         };
@@ -1064,8 +1193,8 @@ mod tests {
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             touched_events: Arc::new(Mutex::new(HashSet::new())),
             options: FeedOptions::default(),
-            event_tx: tokio::sync::mpsc::channel(32).0,
-            event_rx: tokio::sync::mpsc::channel(32).1,
+            event_tx: Arc::new(Mutex::new(tokio::sync::mpsc::channel(32).0)),
+            event_rx: Arc::new(Mutex::new(tokio::sync::mpsc::channel(32).1)),
             data_tx,
             data_rx,
         };

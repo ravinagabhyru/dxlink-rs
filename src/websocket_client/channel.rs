@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::Sender;
 use tokio::time::{timeout, Duration};
-use tracing::{debug, error};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::core::channel;
@@ -103,16 +103,19 @@ impl DxLinkWebSocketChannel {
     /// type based on the message_type field, ensures the channel ID is set correctly,
     /// and then sends the message.
     pub async fn send(&self, message: DxLinkChannelMessage) -> Result<(), ChannelError> {
-        // Check channel state using direct mutex access
-        let channel_state = *self.state.lock().unwrap();
-        if channel_state != DxLinkChannelState::Opened {
+        tracing::info!("Channel {} sending message type: {}", self.id, message.message_type);
+        tracing::debug!("Message payload: {:?}", message.payload);
+
+        if self.state() != DxLinkChannelState::Opened {
+            tracing::warn!("Cannot send message - channel {} not in Opened state (current state: {:?})", self.id, self.state());
             return Err(ChannelError::NotReady {
-                state: channel_state,
+                state: self.state(),
             });
         }
 
         // Verify message type is supported
         if !SUPPORTED_MESSAGE_TYPES.contains(&message.message_type.as_str()) {
+            tracing::warn!("Unsupported message type: {}", message.message_type);
             return Err(ChannelError::UnsupportedMessageType {
                 message_type: message.message_type.clone(),
                 supported: SUPPORTED_MESSAGE_TYPES.join(", "),
@@ -123,14 +126,17 @@ impl DxLinkWebSocketChannel {
         let boxed_message: Box<dyn Message + Send + Sync> = match message.message_type.as_str() {
             // Feed service messages
             "FEED_SUBSCRIPTION" => {
+                tracing::debug!("Converting to FeedSubscriptionMessage");
                 // Deserialize payload into FeedSubscriptionMessage
                 match serde_json::from_value::<FeedSubscriptionMessage>(message.payload.clone()) {
                     Ok(mut feed_sub_msg) => {
                         // Ensure the channel ID is set correctly
                         feed_sub_msg.channel = self.id;
+                        tracing::debug!("Converted to FeedSubscriptionMessage: {:?}", feed_sub_msg);
                         Box::new(MessageType::FeedSubscription(feed_sub_msg))
                     }
                     Err(e) => {
+                        tracing::error!("Failed to deserialize FEED_SUBSCRIPTION message: {}", e);
                         return Err(ChannelError::InvalidPayload(format!(
                             "Failed to deserialize FEED_SUBSCRIPTION message: {}",
                             e
@@ -139,14 +145,17 @@ impl DxLinkWebSocketChannel {
                 }
             }
             "FEED_SETUP" => {
+                tracing::debug!("Converting to FeedSetupMessage");
                 // Deserialize payload into FeedSetupMessage
                 match serde_json::from_value::<FeedSetupMessage>(message.payload.clone()) {
                     Ok(mut feed_setup_msg) => {
                         // Ensure the channel ID is set correctly
                         feed_setup_msg.channel = self.id;
+                        tracing::debug!("Converted to FeedSetupMessage: {:?}", feed_setup_msg);
                         Box::new(MessageType::FeedSetup(feed_setup_msg))
                     }
                     Err(e) => {
+                        tracing::error!("Failed to deserialize FEED_SETUP message: {}", e);
                         return Err(ChannelError::InvalidPayload(format!(
                             "Failed to deserialize FEED_SETUP message: {}",
                             e
@@ -156,14 +165,17 @@ impl DxLinkWebSocketChannel {
             }
             // DOM service messages
             "DOM_SETUP" => {
+                tracing::debug!("Converting to DomSetupMessage");
                 // Deserialize payload into DomSetupMessage
                 match serde_json::from_value::<DomSetupMessage>(message.payload.clone()) {
                     Ok(mut dom_setup_msg) => {
                         // Ensure the channel ID is set correctly
                         dom_setup_msg.channel = self.id;
+                        tracing::debug!("Converted to DomSetupMessage: {:?}", dom_setup_msg);
                         Box::new(MessageType::DomSetup(dom_setup_msg))
                     }
                     Err(e) => {
+                        tracing::error!("Failed to deserialize DOM_SETUP message: {}", e);
                         return Err(ChannelError::InvalidPayload(format!(
                             "Failed to deserialize DOM_SETUP message: {}",
                             e
@@ -173,14 +185,17 @@ impl DxLinkWebSocketChannel {
             }
             // Channel lifecycle messages
             "CHANNEL_REQUEST" => {
+                tracing::debug!("Converting to ChannelRequestMessage");
                 // Deserialize payload into ChannelRequestMessage
                 match serde_json::from_value::<ChannelRequestMessage>(message.payload.clone()) {
                     Ok(mut channel_req_msg) => {
                         // Ensure the channel ID is set correctly
                         channel_req_msg.channel = self.id;
+                        tracing::debug!("Converted to ChannelRequestMessage: {:?}", channel_req_msg);
                         Box::new(MessageType::ChannelRequest(channel_req_msg))
                     }
                     Err(e) => {
+                        tracing::error!("Failed to deserialize CHANNEL_REQUEST message: {}", e);
                         return Err(ChannelError::InvalidPayload(format!(
                             "Failed to deserialize CHANNEL_REQUEST message: {}",
                             e
@@ -189,23 +204,28 @@ impl DxLinkWebSocketChannel {
                 }
             }
             "CHANNEL_CANCEL" => {
+                tracing::debug!("Creating ChannelCancelMessage");
                 // Create a ChannelCancelMessage with the correct channel ID
                 let cancel_msg = ChannelCancelMessage {
                     message_type: message.message_type.clone(),
                     channel: self.id,
                 };
+                tracing::debug!("Created ChannelCancelMessage: {:?}", cancel_msg);
                 Box::new(MessageType::ChannelCancel(cancel_msg))
             }
             // Error handling
             "ERROR" => {
+                tracing::debug!("Converting to ErrorMessage");
                 // Deserialize payload into ErrorMessage
                 match serde_json::from_value::<ErrorMessage>(message.payload.clone()) {
                     Ok(mut error_msg) => {
                         // Ensure the channel ID is set correctly
                         error_msg.channel = self.id;
+                        tracing::debug!("Converted to ErrorMessage: {:?}", error_msg);
                         Box::new(MessageType::Error(error_msg))
                     }
                     Err(e) => {
+                        tracing::error!("Failed to deserialize ERROR message: {}", e);
                         return Err(ChannelError::InvalidPayload(format!(
                             "Failed to deserialize ERROR message: {}",
                             e
@@ -215,6 +235,7 @@ impl DxLinkWebSocketChannel {
             }
             // This should never happen if we correctly validate against SUPPORTED_MESSAGE_TYPES
             unsupported => {
+                tracing::error!("Unsupported message type: {}", unsupported);
                 return Err(ChannelError::UnsupportedMessageType {
                     message_type: unsupported.to_string(),
                     supported: SUPPORTED_MESSAGE_TYPES.join(", "),
@@ -223,6 +244,7 @@ impl DxLinkWebSocketChannel {
         };
 
         // Add timeout to send operation
+        tracing::debug!("Sending message to WebSocket with timeout of {} seconds", DEFAULT_TIMEOUT_SECS);
         match timeout(
             Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             self.message_sender.send(boxed_message),
@@ -230,12 +252,19 @@ impl DxLinkWebSocketChannel {
         .await
         {
             Ok(result) => {
-                result.map_err(|e| ChannelError::SendError(e.to_string()))?;
+                result.map_err(|e| {
+                    tracing::error!("Failed to send message: {}", e);
+                    ChannelError::SendError(e.to_string())
+                })?;
+                tracing::info!("Successfully sent message to WebSocket");
                 Ok(())
             }
-            Err(_) => Err(ChannelError::Timeout {
-                timeout_secs: DEFAULT_TIMEOUT_SECS,
-            }),
+            Err(_) => {
+                tracing::error!("Timeout sending message after {} seconds", DEFAULT_TIMEOUT_SECS);
+                Err(ChannelError::Timeout {
+                    timeout_secs: DEFAULT_TIMEOUT_SECS,
+                })
+            }
         }
     }
 
