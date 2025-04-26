@@ -3,7 +3,6 @@ use dxlink_rs::websocket_client::{DxLinkWebSocketClient, DxLinkWebSocketClientCo
 use dxlink_rs::FeedContract;
 use dxlink_rs::core::client::DxLinkConnectionState;
 use dxlink_rs::core::auth::DxLinkAuthState;
-use dxlink_rs::core::channel::DxLinkChannelState;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -232,7 +231,7 @@ async fn test_feed_subscription_lifecycle() {
         log_level: DxLinkLogLevel::Info,
         max_reconnect_attempts: 3,
     };
-    let mut client = DxLinkWebSocketClient::new(config);
+    let client = DxLinkWebSocketClient::new(config);
     let client = Arc::new(Mutex::new(client));
 
     // Connect to DEMO URL

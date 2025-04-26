@@ -915,10 +915,6 @@ mod tests {
                 "bidPrice",
                 "bidSize",
                 "eventSymbol",
-                "eventTime",
-                "eventType",
-                "sequence",
-                "timeNanoPart",
             ]);
         } else {
             panic!("Expected Quote event");

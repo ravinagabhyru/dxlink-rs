@@ -195,26 +195,37 @@ pub struct QuoteEvent {
     /// Symbol for this event
     pub event_symbol: String,
     /// Timestamp of this event
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub event_time: Option<u64>,
     /// Sequence number for ordering
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
     /// Nanosecond part of the timestamp
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub time_nano_part: Option<u64>,
     /// Bid timestamp
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub bid_time: Option<u64>,
     /// Exchange code for the bid
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub bid_exchange_code: Option<String>,
     /// Bid price
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub bid_price: Option<JSONDouble>,
     /// Bid size
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub bid_size: Option<JSONDouble>,
     /// Ask timestamp
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ask_time: Option<u64>,
     /// Exchange code for the ask
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ask_exchange_code: Option<String>,
     /// Ask price
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ask_price: Option<JSONDouble>,
     /// Ask size
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ask_size: Option<JSONDouble>,
 }
 

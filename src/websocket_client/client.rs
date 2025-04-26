@@ -192,7 +192,7 @@ impl DxLinkWebSocketClient {
         let channel_id = {
             let mut id = self.next_channel_id.lock().await;
             let current = *id;
-            *id += 2;
+            *id += 1;
             current
         };
 
