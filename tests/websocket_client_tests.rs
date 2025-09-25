@@ -1,17 +1,17 @@
-use std::collections::HashMap;
-use serde_json::json;
 use dxlink_rs::{
     core::{
         auth::DxLinkAuthState,
         channel::{DxLinkChannelMessage, DxLinkChannelState},
-        client::DxLinkConnectionState
+        client::DxLinkConnectionState,
     },
     websocket_client::{
         client::DxLinkWebSocketClient,
         config::DxLinkWebSocketClientConfig,
-        messages::{MessageType, ChannelClosedMessage, ChannelOpenedMessage},
+        messages::{ChannelClosedMessage, ChannelOpenedMessage, MessageType},
     },
 };
+use serde_json::json;
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -32,28 +32,32 @@ async fn create_client() -> DxLinkWebSocketClient {
 
     // Set up connection and authentication state listeners
     let (conn_tx, mut conn_rx) = mpsc::channel(32);
-    client.add_connection_state_change_listener(Box::new({
-        let tx = conn_tx.clone();
-        move |new_state: &DxLinkConnectionState, _old: &DxLinkConnectionState| {
-            let new_state = *new_state;
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                tx.send(new_state).await.unwrap();
-            });
-        }
-    })).await;
+    client
+        .add_connection_state_change_listener(Box::new({
+            let tx = conn_tx.clone();
+            move |new_state: &DxLinkConnectionState, _old: &DxLinkConnectionState| {
+                let new_state = *new_state;
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    tx.send(new_state).await.unwrap();
+                });
+            }
+        }))
+        .await;
 
     let (auth_tx, mut auth_rx) = mpsc::channel(32);
-    client.add_auth_state_change_listener(Box::new({
-        let tx = auth_tx.clone();
-        move |new_state: &DxLinkAuthState, _old: &DxLinkAuthState| {
-            let new_state = *new_state;
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                tx.send(new_state).await.unwrap();
-            });
-        }
-    })).await;
+    client
+        .add_auth_state_change_listener(Box::new({
+            let tx = auth_tx.clone();
+            move |new_state: &DxLinkAuthState, _old: &DxLinkAuthState| {
+                let new_state = *new_state;
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    tx.send(new_state).await.unwrap();
+                });
+            }
+        }))
+        .await;
 
     // Connect to server
     let con = client.connect(DEMO_DXLINK_WS_URL.to_string()).await;
@@ -90,7 +94,10 @@ async fn create_client() -> DxLinkWebSocketClient {
 
 // Helper function to wait for expected client states
 async fn wait_for_states(client: &DxLinkWebSocketClient) {
-    assert_eq!(client.get_connection_state().await, DxLinkConnectionState::Connected);
+    assert_eq!(
+        client.get_connection_state().await,
+        DxLinkConnectionState::Connected
+    );
     assert_eq!(client.get_auth_state().await, DxLinkAuthState::Authorized);
 }
 
@@ -125,7 +132,11 @@ async fn test_connection_setup() {
         .add_connection_state_change_listener(Box::new({
             let tx = tx.clone();
             move |new_state: &DxLinkConnectionState, old_state: &DxLinkConnectionState| {
-                tracing::debug!("Connection state changed from {:?} to {:?}", old_state, new_state);
+                tracing::debug!(
+                    "Connection state changed from {:?} to {:?}",
+                    old_state,
+                    new_state
+                );
                 let new_state = *new_state;
                 let tx = tx.clone();
                 // Spawn a new async task to send the state change
@@ -168,7 +179,6 @@ async fn test_connection_setup() {
     assert_eq!(state, DxLinkConnectionState::NotConnected);
 }
 
-
 #[tokio::test]
 async fn test_authentication() {
     let config = DxLinkWebSocketClientConfig::default();
@@ -177,16 +187,17 @@ async fn test_authentication() {
     let (tx, mut rx) = mpsc::channel(32);
 
     client
-            .add_auth_state_change_listener(Box::new({
+        .add_auth_state_change_listener(Box::new({
+            let tx = tx.clone();
+            move |new_state: &DxLinkAuthState, _old: &DxLinkAuthState| {
+                let new_state = *new_state;
                 let tx = tx.clone();
-                move |new_state: &DxLinkAuthState, _old: &DxLinkAuthState| {
-                    let new_state = *new_state;
-                    let tx = tx.clone();
-                    tokio::spawn(async move {
-                        tx.send(new_state).await.unwrap();
-                    });
-                }
-            })).await;
+                tokio::spawn(async move {
+                    tx.send(new_state).await.unwrap();
+                });
+            }
+        }))
+        .await;
     let con = client.connect(DEMO_DXLINK_WS_URL.to_string()).await;
     assert!(con.is_ok());
 
@@ -209,12 +220,11 @@ async fn test_feed_channel_request_and_close() {
     init_logging();
 
     let mut client = create_client().await;
-    
+
     // Open a FEED channel
-    let channel = client.open_channel(
-        "FEED".to_string(),
-        json!({"contract": "AUTO"}),
-    ).await;
+    let channel = client
+        .open_channel("FEED".to_string(), json!({"contract": "AUTO"}))
+        .await;
 
     // Verify channel is created
     assert_eq!((*channel).id, 1);
@@ -288,29 +298,33 @@ async fn test_feed_subscription() {
 
     // Set up connection state listener
     let (conn_tx, mut conn_rx) = mpsc::channel(32);
-    client.add_connection_state_change_listener(Box::new({
-        let tx = conn_tx.clone();
-        move |new_state: &DxLinkConnectionState, _old: &DxLinkConnectionState| {
-            let new_state = *new_state;
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                tx.send(new_state).await.unwrap();
-            });
-        }
-    })).await;
+    client
+        .add_connection_state_change_listener(Box::new({
+            let tx = conn_tx.clone();
+            move |new_state: &DxLinkConnectionState, _old: &DxLinkConnectionState| {
+                let new_state = *new_state;
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    tx.send(new_state).await.unwrap();
+                });
+            }
+        }))
+        .await;
 
     // Set up auth state listener
     let (auth_tx, mut auth_rx) = mpsc::channel(32);
-    client.add_auth_state_change_listener(Box::new({
-        let tx = auth_tx.clone();
-        move |new_state: &DxLinkAuthState, _old: &DxLinkAuthState| {
-            let new_state = *new_state;
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                tx.send(new_state).await.unwrap();
-            });
-        }
-    })).await;
+    client
+        .add_auth_state_change_listener(Box::new({
+            let tx = auth_tx.clone();
+            move |new_state: &DxLinkAuthState, _old: &DxLinkAuthState| {
+                let new_state = *new_state;
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    tx.send(new_state).await.unwrap();
+                });
+            }
+        }))
+        .await;
 
     // Connect to server
     let con = client.connect(DEMO_DXLINK_WS_URL.to_string()).await;
@@ -355,53 +369,61 @@ async fn test_feed_subscription() {
             let message = match msg.message_type.as_str() {
                 "CHANNEL_OPENED" => {
                     tracing::info!("Processing CHANNEL_OPENED message");
-                    let params = msg.payload.get("parameters")
+                    let params = msg
+                        .payload
+                        .get("parameters")
                         .and_then(|v| v.as_object())
                         .map(|obj| {
-                            obj.iter().map(|(k, v)| {
-                                (k.clone(), v.clone())
-                            }).collect::<HashMap<String, serde_json::Value>>()
+                            obj.iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect::<HashMap<String, serde_json::Value>>()
                         });
 
                     Some(MessageType::ChannelOpened(ChannelOpenedMessage {
                         message_type: msg.message_type.clone(),
-                        channel: msg.payload.get("channel")
+                        channel: msg
+                            .payload
+                            .get("channel")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0),
-                        service: msg.payload.get("service")
+                        service: msg
+                            .payload
+                            .get("service")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string(),
-                        parameters: params
+                        parameters: params,
                     }))
-                },
+                }
                 "FEED_CONFIG" => {
                     tracing::info!("Processing FEED_CONFIG message");
                     serde_json::from_value(msg.payload.clone())
                         .map(|config| MessageType::FeedConfig(config))
                         .ok()
-                },
+                }
                 "FEED_DATA" => {
                     tracing::info!("Processing FEED_DATA message");
                     serde_json::from_value(msg.payload.clone())
                         .map(|data| MessageType::FeedData(data))
                         .ok()
-                },
+                }
                 "CHANNEL_CLOSED" => {
                     tracing::info!("Processing CHANNEL_CLOSED message");
                     Some(MessageType::ChannelClosed(ChannelClosedMessage {
                         message_type: msg.message_type.clone(),
-                        channel: msg.payload.get("channel")
+                        channel: msg
+                            .payload
+                            .get("channel")
                             .and_then(|v| v.as_u64())
-                            .unwrap_or(0)
+                            .unwrap_or(0),
                     }))
-                },
+                }
                 _ => {
                     tracing::info!("Ignoring message type: {}", msg.message_type);
                     None
                 }
             };
-            
+
             if let Some(message_type) = message {
                 tokio::spawn(async move {
                     tracing::info!("Sending message to channel: {:?}", message_type);
@@ -415,7 +437,11 @@ async fn test_feed_subscription() {
     let state_listener = Box::new({
         let tx = state_tx.clone();
         move |new_state: &DxLinkChannelState, old_state: &DxLinkChannelState| {
-            tracing::debug!("Channel state changed from {:?} to {:?}", old_state, new_state);
+            tracing::debug!(
+                "Channel state changed from {:?} to {:?}",
+                old_state,
+                new_state
+            );
             let new_state = *new_state;
             let tx = tx.clone();
             tokio::spawn(async move {
@@ -440,9 +466,12 @@ async fn test_feed_subscription() {
     let start_time = std::time::Instant::now();
     while !channel_opened {
         if start_time.elapsed() > Duration::from_secs(5) {
-            panic!("Timeout waiting for channel to open. Current state: {:?}", channel.state());
+            panic!(
+                "Timeout waiting for channel to open. Current state: {:?}",
+                channel.state()
+            );
         }
-        
+
         match timeout(Duration::from_millis(100), state_rx.recv()).await {
             Ok(Some(state)) => {
                 if state == DxLinkChannelState::Opened {
@@ -464,7 +493,10 @@ async fn test_feed_subscription() {
         }
     }
 
-    assert!(channel_opened, "Channel failed to open within timeout period");
+    assert!(
+        channel_opened,
+        "Channel failed to open within timeout period"
+    );
 
     // Add a small delay to ensure the channel is fully initialized
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -484,20 +516,24 @@ async fn test_feed_subscription() {
             "acceptEventFields": {
                 "Quote": ["eventType", "eventSymbol", "bidPrice", "askPrice", "bidSize", "askSize"]
             }
-        })
+        }),
     };
     tracing::debug!("FEED_SETUP message: {:?}", setup_msg);
     let setup_result = channel.send(setup_msg).await;
     tracing::debug!("FEED_SETUP result: {:?}", setup_result);
-    assert!(setup_result.is_ok(), "Failed to send FEED_SETUP message: {:?}", setup_result);
-    
+    assert!(
+        setup_result.is_ok(),
+        "Failed to send FEED_SETUP message: {:?}",
+        setup_result
+    );
+
     // Wait for FEED_CONFIG response
     tracing::info!("Waiting for FEED_CONFIG message");
     if let Ok(Some(msg)) = timeout(Duration::from_secs(5), msg_rx.recv()).await {
         match msg {
             MessageType::FeedConfig(config) => {
                 tracing::info!("Received feed config: {:?}", config);
-            },
+            }
             _ => panic!("Expected FEED_CONFIG message but got: {:?}", msg),
         }
     } else {
@@ -512,7 +548,7 @@ async fn test_feed_subscription() {
             "type": "FEED_SUBSCRIPTION",
             "channel": channel.id,
             "add": [{ "symbol": "AAPL", "type": "Quote" }]
-        })
+        }),
     };
     tracing::debug!("FEED_SUBSCRIPTION message: {:?}", sub_msg);
     let sub_result = channel.send(sub_msg).await;
@@ -522,29 +558,33 @@ async fn test_feed_subscription() {
     tracing::info!("Waiting for feed data");
     let mut received_data = false;
     let mut attempts = 0;
-    let max_attempts = 3;  // Try up to 3 times to get data
+    let max_attempts = 3; // Try up to 3 times to get data
 
     while !received_data && attempts < max_attempts {
         attempts += 1;
-        tracing::info!("Attempt {} of {} to receive feed data", attempts, max_attempts);
-        
-        let received_msg = timeout(Duration::from_secs(10), msg_rx.recv()).await;  // Increased timeout to 10 seconds
+        tracing::info!(
+            "Attempt {} of {} to receive feed data",
+            attempts,
+            max_attempts
+        );
+
+        let received_msg = timeout(Duration::from_secs(10), msg_rx.recv()).await; // Increased timeout to 10 seconds
         if let Ok(Some(msg)) = received_msg {
             match msg {
                 MessageType::FeedConfig(config) => {
                     tracing::info!("Received feed config: {:?}", config);
                     // Continue waiting for FEED_DATA
-                },
+                }
                 MessageType::FeedData(data) => {
                     tracing::info!("Received feed data: {:?}", data);
                     // Verify it's for our channel
                     assert_eq!(data.channel, channel.id);
                     received_data = true;
-                },
+                }
                 _ => {
                     tracing::debug!("Received unexpected message type: {:?}", msg);
                     // Don't panic, just continue waiting for the right message
-                },
+                }
             }
         } else {
             tracing::warn!("Timeout waiting for feed data on attempt {}", attempts);
@@ -559,7 +599,11 @@ async fn test_feed_subscription() {
     // Clean close the channel
     tracing::info!("Closing channel");
     let close_result = channel.close().await;
-    assert!(close_result.is_ok(), "Failed to close channel: {:?}", close_result);
+    assert!(
+        close_result.is_ok(),
+        "Failed to close channel: {:?}",
+        close_result
+    );
 
     // Wait for channel closed message
     tracing::info!("Waiting for CHANNEL_CLOSED message");
@@ -567,7 +611,7 @@ async fn test_feed_subscription() {
         match msg {
             MessageType::ChannelClosed(closed) => {
                 assert_eq!(closed.channel, channel.id);
-            },
+            }
             _ => panic!("Expected CHANNEL_CLOSED message but got: {:?}", msg),
         }
     }

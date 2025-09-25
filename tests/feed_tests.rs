@@ -1,14 +1,16 @@
-use dxlink_rs::feed::{Feed, FeedAcceptConfig, FeedDataFormat, FeedEvent, FeedOptions};
-use dxlink_rs::websocket_client::{DxLinkWebSocketClient, DxLinkWebSocketClientConfig, DxLinkLogLevel};
-use dxlink_rs::FeedContract;
-use dxlink_rs::core::client::DxLinkConnectionState;
 use dxlink_rs::core::auth::DxLinkAuthState;
+use dxlink_rs::core::client::DxLinkConnectionState;
+use dxlink_rs::feed::{Feed, FeedAcceptConfig, FeedDataFormat, FeedEvent, FeedOptions};
+use dxlink_rs::websocket_client::{
+    DxLinkLogLevel, DxLinkWebSocketClient, DxLinkWebSocketClientConfig,
+};
+use dxlink_rs::FeedContract;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration as TokioDuration};
-use std::collections::HashMap;
 
 const DEMO_DXLINK_WS_URL: &str = "wss://demo.dxfeed.com/dxlink-ws";
 
@@ -41,7 +43,9 @@ async fn test_feed_lifecycle() {
         accept_data_format: Some(FeedDataFormat::Full),
         accept_event_fields: None,
     };
-    feed.configure(config).await.expect("Failed to configure feed");
+    feed.configure(config)
+        .await
+        .expect("Failed to configure feed");
 
     // Add subscriptions
     let sub1 = json!({ "type": "Quote", "symbol": "AAPL" });
@@ -93,7 +97,9 @@ async fn test_feed_data_handling() {
         accept_data_format: Some(FeedDataFormat::Full),
         accept_event_fields: None,
     };
-    feed.configure(config).await.expect("Failed to configure feed");
+    feed.configure(config)
+        .await
+        .expect("Failed to configure feed");
 
     // Add a subscription
     let sub = json!({ "type": "Quote", "symbol": "AAPL" });
@@ -149,7 +155,9 @@ async fn test_feed_config_handling() {
         accept_data_format: Some(FeedDataFormat::Full),
         accept_event_fields: None,
     };
-    feed.configure(config).await.expect("Failed to configure feed");
+    feed.configure(config)
+        .await
+        .expect("Failed to configure feed");
 
     // Wait for the configuration to be processed
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -235,7 +243,11 @@ async fn test_feed_subscription_lifecycle() {
     let client = Arc::new(Mutex::new(client));
 
     // Connect to DEMO URL
-    let con = client.lock().await.connect(DEMO_DXLINK_WS_URL.to_string()).await;
+    let con = client
+        .lock()
+        .await
+        .connect(DEMO_DXLINK_WS_URL.to_string())
+        .await;
     assert!(con.is_ok(), "Failed to connect to DEMO URL");
     tracing::debug!("Connected to server");
 
@@ -246,7 +258,9 @@ async fn test_feed_subscription_lifecycle() {
         let client_state = client.lock().await.get_connection_state().await;
         let auth_state = client.lock().await.get_auth_state().await;
 
-        if client_state == DxLinkConnectionState::Connected && auth_state == DxLinkAuthState::Authorized {
+        if client_state == DxLinkConnectionState::Connected
+            && auth_state == DxLinkAuthState::Authorized
+        {
             break;
         }
 
@@ -254,7 +268,10 @@ async fn test_feed_subscription_lifecycle() {
         attempts += 1;
     }
 
-    assert!(attempts < max_attempts, "Failed to reach Connected and Authorized state");
+    assert!(
+        attempts < max_attempts,
+        "Failed to reach Connected and Authorized state"
+    );
 
     // Create a feed service
     let mut feed = Feed::new(
@@ -285,7 +302,9 @@ async fn test_feed_subscription_lifecycle() {
             ],
         )])),
     };
-    feed.configure(config).await.expect("Failed to configure feed");
+    feed.configure(config)
+        .await
+        .expect("Failed to configure feed");
 
     // Subscribe to data events
     let mut rx = feed.subscribe_to_data_events();
@@ -300,11 +319,15 @@ async fn test_feed_subscription_lifecycle() {
     tracing::info!("Waiting for feed data");
     let mut received_data = false;
     let mut attempts = 0;
-    let max_attempts = 3;  // Try up to 3 times to get data
+    let max_attempts = 3; // Try up to 3 times to get data
 
     while !received_data && attempts < max_attempts {
         attempts += 1;
-        tracing::info!("Attempt {} of {} to receive feed data", attempts, max_attempts);
+        tracing::info!(
+            "Attempt {} of {} to receive feed data",
+            attempts,
+            max_attempts
+        );
 
         let result = timeout(TokioDuration::from_secs(10), rx.recv()).await;
         if let Ok(Ok(event)) = result {
@@ -313,11 +336,11 @@ async fn test_feed_subscription_lifecycle() {
                     tracing::info!("Received quote data: {:?}", quote);
                     assert_eq!(quote.event_symbol, "AAPL");
                     received_data = true;
-                },
+                }
                 _ => {
                     tracing::debug!("Received unexpected event type: {:?}", event);
                     // Don't panic, just continue waiting for the right event
-                },
+                }
             }
         } else {
             tracing::warn!("Timeout waiting for feed data on attempt {}", attempts);

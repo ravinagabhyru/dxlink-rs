@@ -109,13 +109,17 @@ impl DxLinkWebSocketClientConfigBuilder {
     pub fn build(self) -> DxLinkWebSocketClientConfig {
         let default = DxLinkWebSocketClientConfig::default();
         DxLinkWebSocketClientConfig {
-            keepalive_interval: self.keepalive_interval.unwrap_or(default.keepalive_interval),
+            keepalive_interval: self
+                .keepalive_interval
+                .unwrap_or(default.keepalive_interval),
             keepalive_timeout: self.keepalive_timeout.unwrap_or(default.keepalive_timeout),
-            accept_keepalive_timeout: self.accept_keepalive_timeout
+            accept_keepalive_timeout: self
+                .accept_keepalive_timeout
                 .unwrap_or(default.accept_keepalive_timeout),
             action_timeout: self.action_timeout.unwrap_or(default.action_timeout),
             log_level: self.log_level.unwrap_or(default.log_level),
-            max_reconnect_attempts: self.max_reconnect_attempts
+            max_reconnect_attempts: self
+                .max_reconnect_attempts
                 .unwrap_or(default.max_reconnect_attempts),
         }
     }

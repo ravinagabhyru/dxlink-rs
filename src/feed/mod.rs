@@ -1,9 +1,9 @@
 //! Feed service module for real-time market data streaming.
 
-pub mod messages;
 pub mod events;
 mod feed;
+pub mod messages;
 
-pub use messages::*;
 pub use events::*;
-pub use feed::{Feed, FeedOptions, FeedConfig, FeedAcceptConfig};
+pub use feed::{Feed, FeedAcceptConfig, FeedConfig, FeedOptions};
+pub use messages::*;

@@ -1,12 +1,14 @@
-use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
-use serde_json::{json, Value};
 use async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashMap;
 
 use crate::core::errors::{DxLinkError, DxLinkErrorType};
 
-use crate::feed::messages::{FeedSetupMessage, FeedConfigMessage, FeedSubscriptionMessage, FeedDataMessage};
-use crate::dom::messages::{DomSetupMessage, DomConfigMessage, DomSnapshotMessage};
+use crate::dom::messages::{DomConfigMessage, DomSetupMessage, DomSnapshotMessage};
+use crate::feed::messages::{
+    FeedConfigMessage, FeedDataMessage, FeedSetupMessage, FeedSubscriptionMessage,
+};
 
 /// Enum representing all possible message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,7 +206,10 @@ pub struct SetupMessage {
     pub version: String,
     #[serde(rename = "keepaliveTimeout", skip_serializing_if = "Option::is_none")]
     pub keepalive_timeout: Option<u64>,
-    #[serde(rename = "acceptKeepaliveTimeout", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "acceptKeepaliveTimeout",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub accept_keepalive_timeout: Option<u64>,
 }
 
@@ -391,9 +396,7 @@ pub mod util {
     /// Check if a message is a channel lifecycle message
     pub fn is_channel_lifecycle_message(message: &Box<dyn Message + Send + Sync>) -> bool {
         let msg_type = message.message_type();
-        msg_type == "CHANNEL_OPENED"
-            || msg_type == "CHANNEL_CLOSED"
-            || msg_type == "ERROR"
+        msg_type == "CHANNEL_OPENED" || msg_type == "CHANNEL_CLOSED" || msg_type == "ERROR"
     }
 }
 
@@ -570,7 +573,13 @@ mod tests {
         assert_eq!(msg.service, "FEED");
         assert!(msg.parameters.is_some());
         assert_eq!(
-            msg.parameters.as_ref().unwrap().get("contract").unwrap().as_str().unwrap(),
+            msg.parameters
+                .as_ref()
+                .unwrap()
+                .get("contract")
+                .unwrap()
+                .as_str()
+                .unwrap(),
             "AUTO"
         );
     }

@@ -11,8 +11,8 @@ use tracing;
 use wasm_bindgen::prelude::*;
 
 pub mod core;
-pub mod feed;
 pub mod dom;
+pub mod feed;
 pub mod websocket_client;
 
 #[cfg(feature = "wasm")]
@@ -30,23 +30,23 @@ pub fn init() {
 }
 
 // Re-export main types for convenient usage
-pub use crate::core::errors::{DxLinkError, DxLinkErrorType, Result};
-pub use crate::core::client::{
-    DxLinkConnectionDetails, DxLinkConnectionState,
-    ConnectionStateChangeListener,
-};
 pub use crate::core::channel::{
-    ChannelMessageListener, ChannelStateChangeListener, ChannelErrorListener,
-    DxLinkChannelMessage, DxLinkChannelState,
+    ChannelErrorListener, ChannelMessageListener, ChannelStateChangeListener, DxLinkChannelMessage,
+    DxLinkChannelState,
 };
-pub use crate::feed::{
-    Feed, FeedAcceptConfig, FeedDataFormat, FeedEventFields, FeedOptions,
+pub use crate::core::client::{
+    ConnectionStateChangeListener, DxLinkConnectionDetails, DxLinkConnectionState,
 };
-pub use crate::feed::messages::
-    {FeedSubscriptionEntry, FeedSetupMessage, FeedConfigMessage,
-    FeedSubscriptionMessage, FeedDataMessage, FeedData, FeedContract};
-pub use crate::dom::messages::{DomSetupMessage, DomConfigMessage, DomSnapshotMessage, BidAskEntry};
+pub use crate::core::errors::{DxLinkError, DxLinkErrorType, Result};
+pub use crate::dom::messages::{
+    BidAskEntry, DomConfigMessage, DomSetupMessage, DomSnapshotMessage,
+};
 pub use crate::dom::DomService;
+pub use crate::feed::messages::{
+    FeedConfigMessage, FeedContract, FeedData, FeedDataMessage, FeedSetupMessage,
+    FeedSubscriptionEntry, FeedSubscriptionMessage,
+};
+pub use crate::feed::{Feed, FeedAcceptConfig, FeedDataFormat, FeedEventFields, FeedOptions};
 pub use crate::websocket_client::{
-    DxLinkWebSocketChannel, DxLinkWebSocketClientConfig, DxLinkLogLevel
+    DxLinkLogLevel, DxLinkWebSocketChannel, DxLinkWebSocketClientConfig,
 };

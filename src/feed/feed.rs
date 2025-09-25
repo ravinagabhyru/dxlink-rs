@@ -5,7 +5,7 @@ use serde_json::Value;
 /// configuration, and message handling through DXLink channels.
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, broadcast};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing;
 use uuid::Uuid;
 
@@ -14,8 +14,8 @@ use super::messages::*;
 use crate::core::channel::{DxLinkChannelMessage, DxLinkChannelState};
 use crate::core::errors::{DxLinkError, DxLinkErrorType, Result};
 use crate::websocket_client::channel::DxLinkWebSocketChannel;
-use crate::websocket_client::DxLinkWebSocketClient;
 use crate::websocket_client::messages::Message;
+use crate::websocket_client::DxLinkWebSocketClient;
 
 const FEED_SERVICE_NAME: &str = "FEED";
 const DEFAULT_BATCH_TIME: u64 = 100;
@@ -110,11 +110,11 @@ impl Feed {
         tracing::debug!("Feed options: {:?}", options);
 
         let parameters = serde_json::to_value(FeedParameters { contract })?;
-        let channel = client.lock().await.open_channel(
-                    FEED_SERVICE_NAME.to_string(),
-                    parameters,
-                )
-                .await ;
+        let channel = client
+            .lock()
+            .await
+            .open_channel(FEED_SERVICE_NAME.to_string(), parameters)
+            .await;
 
         // Setup message listeners
         let config_clone = Arc::new(Mutex::new(FeedConfig::default()));
@@ -245,7 +245,10 @@ impl Feed {
 
     /// Remove subscriptions
     pub async fn remove_subscriptions(&self, subscriptions: Vec<Value>) -> Result<()> {
-        tracing::info!("Sending Unsubscribe event for {} subscriptions", subscriptions.len());
+        tracing::info!(
+            "Sending Unsubscribe event for {} subscriptions",
+            subscriptions.len()
+        );
         let mut tx = self.event_tx.lock().await;
         tx.send(FeedEvent::Unsubscribe(subscriptions)).await?;
         tracing::info!("Successfully sent Unsubscribe event");
@@ -318,10 +321,10 @@ impl Feed {
     async fn process_events(&self) -> Result<()> {
         tracing::info!("Feed event processing loop started");
         let mut event_count = 0;
-        
+
         loop {
             tracing::debug!("Waiting for next event... (event count: {})", event_count);
-            
+
             // Get the next event
             let event = {
                 let mut rx = self.event_rx.lock().await;
@@ -329,7 +332,7 @@ impl Feed {
                     Some(event) => {
                         tracing::debug!("Received raw event from channel");
                         event
-                    },
+                    }
                     None => {
                         tracing::warn!("Event channel closed, exiting event loop");
                         break;
@@ -344,41 +347,69 @@ impl Feed {
                 FeedEvent::Reset => "Reset",
                 FeedEvent::Configure(_) => "Configure",
             };
-            tracing::info!("Processing {} event in processing loop (event #{})", event_type, event_count);
+            tracing::info!(
+                "Processing {} event in processing loop (event #{})",
+                event_type,
+                event_count
+            );
 
             match event {
                 FeedEvent::Subscribe(subs) => {
-                    tracing::info!("Processing Subscribe event with {} subscriptions", subs.len());
+                    tracing::info!(
+                        "Processing Subscribe event with {} subscriptions",
+                        subs.len()
+                    );
                     let start_time = std::time::Instant::now();
                     self.handle_subscribe(subs).await;
-                    tracing::info!("Completed Subscribe event processing in {:?}", start_time.elapsed());
+                    tracing::info!(
+                        "Completed Subscribe event processing in {:?}",
+                        start_time.elapsed()
+                    );
                 }
                 FeedEvent::Unsubscribe(subs) => {
-                    tracing::info!("Processing Unsubscribe event with {} subscriptions", subs.len());
+                    tracing::info!(
+                        "Processing Unsubscribe event with {} subscriptions",
+                        subs.len()
+                    );
                     let start_time = std::time::Instant::now();
                     self.handle_unsubscribe(subs).await;
-                    tracing::info!("Completed Unsubscribe event processing in {:?}", start_time.elapsed());
+                    tracing::info!(
+                        "Completed Unsubscribe event processing in {:?}",
+                        start_time.elapsed()
+                    );
                 }
                 FeedEvent::Reset => {
                     tracing::info!("Processing Reset event");
                     let start_time = std::time::Instant::now();
                     self.handle_reset().await;
-                    tracing::info!("Completed Reset event processing in {:?}", start_time.elapsed());
+                    tracing::info!(
+                        "Completed Reset event processing in {:?}",
+                        start_time.elapsed()
+                    );
                 }
                 FeedEvent::Configure(config) => {
                     tracing::info!("Processing Configure event with config: {:?}", config);
                     let start_time = std::time::Instant::now();
                     self.handle_configure(config).await;
-                    tracing::info!("Completed Configure event processing in {:?}", start_time.elapsed());
+                    tracing::info!(
+                        "Completed Configure event processing in {:?}",
+                        start_time.elapsed()
+                    );
                 }
             }
         }
-        tracing::info!("Feed event processing loop ended after processing {} events", event_count);
+        tracing::info!(
+            "Feed event processing loop ended after processing {} events",
+            event_count
+        );
         Ok(())
     }
 
     async fn handle_subscribe(&self, subscriptions: Vec<Value>) {
-        tracing::info!("Starting handle_subscribe with {} subscriptions", subscriptions.len());
+        tracing::info!(
+            "Starting handle_subscribe with {} subscriptions",
+            subscriptions.len()
+        );
         if self.channel.state() != DxLinkChannelState::Opened {
             tracing::warn!("Cannot handle subscription - channel not in Opened state");
             return;
@@ -401,7 +432,10 @@ impl Feed {
 
         // Send only the added subscriptions without reset flag
         if !added.is_empty() {
-            tracing::info!("Sending {} new subscriptions via send_subscription_add", added.len());
+            tracing::info!(
+                "Sending {} new subscriptions via send_subscription_add",
+                added.len()
+            );
             self.send_subscription_add(added).await;
         } else {
             tracing::warn!("No valid subscriptions to send");
@@ -465,7 +499,10 @@ impl Feed {
             return;
         }
 
-        tracing::debug!("Starting subscription message construction with {} subscriptions", subscriptions.len());
+        tracing::debug!(
+            "Starting subscription message construction with {} subscriptions",
+            subscriptions.len()
+        );
         tracing::debug!("Raw subscription values: {:?}", subscriptions);
 
         // Convert from Value to FeedSubscriptionEntry if needed
@@ -474,7 +511,11 @@ impl Feed {
             .filter_map(|v| {
                 let result = serde_json::from_value(v.clone());
                 if let Err(e) = &result {
-                    tracing::warn!("Failed to convert subscription value: {:?}, error: {}", v, e);
+                    tracing::warn!(
+                        "Failed to convert subscription value: {:?}, error: {}",
+                        v,
+                        e
+                    );
                 }
                 result.ok()
             })
@@ -485,7 +526,10 @@ impl Feed {
             return;
         }
 
-        tracing::debug!("Converted {} entries to FeedSubscriptionEntry format", entries.len());
+        tracing::debug!(
+            "Converted {} entries to FeedSubscriptionEntry format",
+            entries.len()
+        );
         tracing::debug!("Converted entries: {:?}", entries);
 
         let msg = FeedSubscriptionMessage {
@@ -505,12 +549,19 @@ impl Feed {
         };
 
         tracing::debug!("Converted to DxLinkChannelMessage: {:?}", channel_msg);
-        tracing::info!("Sending subscription message to channel {}: {:?}", self.channel.id, channel_msg);
+        tracing::info!(
+            "Sending subscription message to channel {}: {:?}",
+            self.channel.id,
+            channel_msg
+        );
 
         if let Err(e) = self.channel.send(channel_msg).await {
             tracing::error!("Failed to send subscription add: {}", e);
         } else {
-            tracing::info!("Successfully sent subscription message to channel {}", self.channel.id);
+            tracing::info!(
+                "Successfully sent subscription message to channel {}",
+                self.channel.id
+            );
         }
     }
 
@@ -658,28 +709,42 @@ impl Feed {
                     tracing::debug!("Forwarding full format event: {:?}", event);
                     let _ = self.data_tx.send(event.clone());
                 }
-            },
+            }
             FeedData::Compact(data) => {
-                tracing::info!("Processing compact format data with {} event types", data.len());
+                tracing::info!(
+                    "Processing compact format data with {} event types",
+                    data.len()
+                );
                 // Process compact data if we have event fields configuration
                 if let Some(ref fields) = config.event_fields {
                     tracing::debug!("Event fields configuration: {:?}", fields);
                     for (event_type, values) in data {
-                        tracing::debug!("Converting compact data for event type {}: {:?}", event_type, values);
+                        tracing::debug!(
+                            "Converting compact data for event type {}: {:?}",
+                            event_type,
+                            values
+                        );
                         if let Some(field_names) = fields.get(event_type) {
-                            tracing::debug!("Found field names for {}: {:?}", event_type, field_names);
+                            tracing::debug!(
+                                "Found field names for {}: {:?}",
+                                event_type,
+                                field_names
+                            );
                         } else {
                             tracing::warn!("No field names found for event type: {}", event_type);
                         }
                     }
                     match message.data.compact_to_full(fields) {
                         Ok(events) => {
-                            tracing::info!("Successfully converted compact data to {} events", events.len());
+                            tracing::info!(
+                                "Successfully converted compact data to {} events",
+                                events.len()
+                            );
                             for event in events {
                                 tracing::debug!("Forwarding converted event: {:?}", event);
                                 let _ = self.data_tx.send(event);
                             }
-                        },
+                        }
                         Err(e) => {
                             tracing::error!("Failed to convert compact data to full format: {}", e);
                             tracing::error!("Compact data was: {:?}", data);
@@ -687,7 +752,9 @@ impl Feed {
                         }
                     }
                 } else {
-                    tracing::error!("Received compact data but no event fields configuration available");
+                    tracing::error!(
+                        "Received compact data but no event fields configuration available"
+                    );
                     tracing::error!("Compact data was: {:?}", data);
                 }
             }
@@ -705,10 +772,10 @@ impl Clone for Feed {
             subscriptions: self.subscriptions.clone(),
             touched_events: self.touched_events.clone(),
             options: self.options.clone(),
-            event_tx: self.event_tx.clone(),  // Use the same sender
-            event_rx: self.event_rx.clone(),  // Use the same receiver
+            event_tx: self.event_tx.clone(), // Use the same sender
+            event_rx: self.event_rx.clone(), // Use the same receiver
             data_tx,
-            data_rx
+            data_rx,
         }
     }
 }
@@ -725,9 +792,9 @@ impl From<mpsc::error::SendError<FeedEvent>> for DxLinkError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::feed::events::{FeedEvent as FeedDataEvent, QuoteEvent, JSONDouble};
-    use crate::websocket_client::config::DxLinkWebSocketClientConfig;
+    use crate::feed::events::{FeedEvent as FeedDataEvent, JSONDouble, QuoteEvent};
     use crate::websocket_client::channel::DxLinkWebSocketChannel;
+    use crate::websocket_client::config::DxLinkWebSocketClientConfig;
     use serde_json::json;
     use tokio::sync::mpsc;
 
@@ -835,7 +902,7 @@ mod tests {
             event_tx: Arc::new(Mutex::new(event_tx)),
             event_rx: Arc::new(Mutex::new(event_rx)),
             data_tx,
-            data_rx
+            data_rx,
         };
         let returned_config = feed.config().await;
         assert_eq!(returned_config.aggregation_period, 42.0);
@@ -863,7 +930,7 @@ mod tests {
             event_tx: Arc::new(Mutex::new(event_tx.clone())),
             event_rx: Arc::new(Mutex::new(tokio::sync::mpsc::channel(32).1)), // Don't use the real receiver
             data_tx,
-            data_rx
+            data_rx,
         };
 
         let sub1 = json!({ "type": "Quote", "symbol": "AAPL" });
@@ -873,18 +940,21 @@ mod tests {
         feed.add_subscriptions(vec![sub1.clone(), sub2.clone()])
             .await
             .unwrap();
-        let received_event = feed.event_tx
+        let received_event = feed
+            .event_tx
             .lock()
             .await
-            .send(super::FeedEvent::Subscribe(vec![sub1.clone(), sub2.clone()]))
+            .send(super::FeedEvent::Subscribe(vec![
+                sub1.clone(),
+                sub2.clone(),
+            ]))
             .await;
         assert!(received_event.is_ok());
 
         // remove
-        feed.remove_subscriptions(vec![sub1.clone()])
-            .await
-            .unwrap();
-        let received_event = feed.event_tx
+        feed.remove_subscriptions(vec![sub1.clone()]).await.unwrap();
+        let received_event = feed
+            .event_tx
             .lock()
             .await
             .send(super::FeedEvent::Unsubscribe(vec![sub1.clone()]))
@@ -892,10 +962,9 @@ mod tests {
         assert!(received_event.is_ok());
 
         // Clear.
-        feed.clear_subscriptions()
-            .await
-            .unwrap();
-        let received_event = feed.event_tx
+        feed.clear_subscriptions().await.unwrap();
+        let received_event = feed
+            .event_tx
             .lock()
             .await
             .send(super::FeedEvent::Reset)
@@ -914,11 +983,16 @@ mod tests {
             FeedContract::Stream,
             None,
             Some(FeedDataFormat::Compact),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // Verify the accept_config was set correctly
         let accept_config = feed.accept_config.lock().await;
-        assert_eq!(accept_config.accept_data_format, Some(FeedDataFormat::Compact));
+        assert_eq!(
+            accept_config.accept_data_format,
+            Some(FeedDataFormat::Compact)
+        );
     }
 
     #[tokio::test]
@@ -927,12 +1001,9 @@ mod tests {
             DxLinkWebSocketClientConfig::default(),
         )));
 
-        let feed = Feed::new(
-            client.clone(),
-            FeedContract::Stream,
-            None,
-            None,
-        ).await.unwrap();
+        let feed = Feed::new(client.clone(), FeedContract::Stream, None, None)
+            .await
+            .unwrap();
 
         // Verify the accept_config was set correctly (default should be None)
         let accept_config = feed.accept_config.lock().await;
@@ -968,9 +1039,10 @@ mod tests {
             channel: 0,
             aggregation_period: 1000.0,
             data_format: FeedDataFormat::Compact,
-            event_fields: Some(HashMap::from([
-                ("Quote".to_string(), vec!["bidPrice".to_string(), "askPrice".to_string()]),
-            ])),
+            event_fields: Some(HashMap::from([(
+                "Quote".to_string(),
+                vec!["bidPrice".to_string(), "askPrice".to_string()],
+            )])),
         };
 
         // Handle the config message
@@ -1061,22 +1133,20 @@ mod tests {
         let data_msg = FeedDataMessage {
             message_type: "FEED_DATA".to_string(),
             channel: 0,
-            data: FeedData::Full(vec![
-                FeedDataEvent::Quote(QuoteEvent {
-                    event_symbol: "AAPL".to_string(),
-                    event_time: Some(1234567890),
-                    sequence: None,
-                    time_nano_part: None,
-                    bid_time: None,
-                    bid_exchange_code: None,
-                    bid_price: Some(JSONDouble::Number(150.0)),
-                    bid_size: Some(JSONDouble::Number(100.0)),
-                    ask_time: None,
-                    ask_exchange_code: None,
-                    ask_price: Some(JSONDouble::Number(151.0)),
-                    ask_size: Some(JSONDouble::Number(200.0)),
-                })
-            ]),
+            data: FeedData::Full(vec![FeedDataEvent::Quote(QuoteEvent {
+                event_symbol: "AAPL".to_string(),
+                event_time: Some(1234567890),
+                sequence: None,
+                time_nano_part: None,
+                bid_time: None,
+                bid_exchange_code: None,
+                bid_price: Some(JSONDouble::Number(150.0)),
+                bid_size: Some(JSONDouble::Number(100.0)),
+                ask_time: None,
+                ask_exchange_code: None,
+                ask_price: Some(JSONDouble::Number(151.0)),
+                ask_size: Some(JSONDouble::Number(200.0)),
+            })]),
         };
 
         // Subscribe to events before sending data
@@ -1086,17 +1156,17 @@ mod tests {
         feed.handle_feed_data(data_msg).await;
 
         // Use timeout for receiving the event
-        let event = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            rx.recv()
-        ).await.expect("Timeout waiting for event").expect("Failed to receive event");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("Timeout waiting for event")
+            .expect("Failed to receive event");
 
         match event {
             FeedDataEvent::Quote(quote) => {
                 assert_eq!(quote.event_symbol, "AAPL");
                 assert!(matches!(quote.bid_price, Some(JSONDouble::Number(n)) if n == 150.0));
                 assert!(matches!(quote.ask_price, Some(JSONDouble::Number(n)) if n == 151.0));
-            },
+            }
             _ => panic!("Expected Quote event"),
         }
     }
@@ -1117,14 +1187,15 @@ mod tests {
             config: Arc::new(Mutex::new(FeedConfig {
                 aggregation_period: 0.0,
                 data_format: FeedDataFormat::Compact,
-                event_fields: Some(HashMap::from([
-                    ("Quote".to_string(), vec![
+                event_fields: Some(HashMap::from([(
+                    "Quote".to_string(),
+                    vec![
                         "eventSymbol".to_string(),
                         "eventTime".to_string(),
                         "bidPrice".to_string(),
                         "askPrice".to_string(),
-                    ]),
-                ])),
+                    ],
+                )])),
             })),
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             touched_events: Arc::new(Mutex::new(HashSet::new())),
@@ -1139,14 +1210,15 @@ mod tests {
         let data_msg = FeedDataMessage {
             message_type: "FEED_DATA".to_string(),
             channel: 0,
-            data: FeedData::Compact(vec![
-                ("Quote".to_string(), vec![
+            data: FeedData::Compact(vec![(
+                "Quote".to_string(),
+                vec![
                     serde_json::Value::String("AAPL".to_string()),
                     serde_json::Value::Number(1234567890.into()),
                     serde_json::Value::Number(150.into()),
                     serde_json::Value::Number(151.into()),
-                ]),
-            ]),
+                ],
+            )]),
         };
 
         // Subscribe to events before sending data
@@ -1156,10 +1228,10 @@ mod tests {
         feed.handle_feed_data(data_msg).await;
 
         // Use timeout for receiving the event
-        let event = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            rx.recv()
-        ).await.expect("Timeout waiting for event").expect("Failed to receive event");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("Timeout waiting for event")
+            .expect("Failed to receive event");
 
         match event {
             FeedDataEvent::Quote(quote) => {
@@ -1167,7 +1239,7 @@ mod tests {
                 assert_eq!(quote.event_time, Some(1234567890));
                 assert!(matches!(quote.bid_price, Some(JSONDouble::Number(n)) if n == 150.0));
                 assert!(matches!(quote.ask_price, Some(JSONDouble::Number(n)) if n == 151.0));
-            },
+            }
             _ => panic!("Expected Quote event"),
         }
     }
@@ -1203,13 +1275,14 @@ mod tests {
         let data_msg = FeedDataMessage {
             message_type: "FEED_DATA".to_string(),
             channel: 0,
-            data: FeedData::Compact(vec![
-                ("Quote".to_string(), vec![
+            data: FeedData::Compact(vec![(
+                "Quote".to_string(),
+                vec![
                     serde_json::Value::String("AAPL".to_string()),
                     serde_json::Value::Number(150.into()),
                     serde_json::Value::Number(151.into()),
-                ]),
-            ]),
+                ],
+            )]),
         };
 
         // Handle the data message

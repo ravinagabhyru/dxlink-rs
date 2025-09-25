@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // Import the Message trait directly to avoid circular dependencies
@@ -23,13 +23,16 @@ pub struct DomSetupMessage {
     #[serde(rename = "type")]
     pub message_type: String,
     pub channel: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "acceptAggregationPeriod",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub accept_aggregation_period: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "acceptDepthLimit", skip_serializing_if = "Option::is_none")]
     pub accept_depth_limit: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "acceptDataFormat", skip_serializing_if = "Option::is_none")]
     pub accept_data_format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "acceptOrderFields", skip_serializing_if = "Option::is_none")]
     pub accept_order_fields: Option<Vec<String>>,
 }
 
@@ -86,6 +89,8 @@ pub struct DomSnapshotMessage {
     pub message_type: String,
     pub channel: u64,
     pub time: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
     pub bids: Vec<BidAskEntry>,
     pub asks: Vec<BidAskEntry>,
 }
@@ -123,10 +128,34 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"DOM_SETUP\""));
         assert!(json.contains("\"channel\":1"));
-        assert!(json.contains("\"accept_aggregation_period\":10"));
-        assert!(json.contains("\"accept_depth_limit\":5"));
-        assert!(json.contains("\"accept_data_format\":\"FULL\""));
-        assert!(json.contains("\"accept_order_fields\":[\"price\",\"size\"]"));
+        assert!(json.contains("\"acceptAggregationPeriod\":10"));
+        assert!(json.contains("\"acceptDepthLimit\":5"));
+        assert!(json.contains("\"acceptDataFormat\":\"FULL\""));
+        assert!(json.contains("\"acceptOrderFields\":[\"price\",\"size\"]"));
+    }
+
+    #[test]
+    fn test_dom_setup_message_round_trip_camel_case() {
+        let json = r#"{
+            "type": "DOM_SETUP",
+            "channel": 42,
+            "acceptAggregationPeriod": 250,
+            "acceptDepthLimit": 15,
+            "acceptDataFormat": "FULL",
+            "acceptOrderFields": ["price", "size"]
+        }"#;
+
+        let msg: DomSetupMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.channel, 42);
+        assert_eq!(msg.accept_aggregation_period, Some(250));
+        assert_eq!(msg.accept_depth_limit, Some(15));
+        assert_eq!(msg.accept_data_format.as_deref(), Some("FULL"));
+        assert_eq!(msg.accept_order_fields.as_ref().unwrap().len(), 2);
+
+        let serialized = serde_json::to_string(&msg).unwrap();
+        assert!(serialized.contains("\"acceptAggregationPeriod\":250"));
+        assert!(serialized.contains("\"acceptDepthLimit\":15"));
+        assert!(serialized.contains("\"acceptOrderFields\":[\"price\",\"size\"]"));
     }
 
     #[test]
@@ -171,6 +200,7 @@ mod tests {
         assert_eq!(msg.message_type, "DOM_SNAPSHOT");
         assert_eq!(msg.channel, 1);
         assert_eq!(msg.time, 1710262466056);
+        assert!(msg.sequence.is_none());
         assert_eq!(msg.bids.len(), 2);
         assert_eq!(msg.bids[0].price, 172.33);
         assert_eq!(msg.bids[0].size, 376.0);

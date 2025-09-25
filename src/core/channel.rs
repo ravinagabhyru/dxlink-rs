@@ -1,5 +1,5 @@
-use std::fmt;
 use crate::core::errors::DxLinkError;
+use std::fmt;
 
 /// Message that can be sent to or received from the channel.
 #[derive(Debug, Clone)]
@@ -36,7 +36,8 @@ impl fmt::Display for DxLinkChannelState {
 pub type ChannelMessageListener = Box<dyn Fn(&DxLinkChannelMessage) + Send + Sync>;
 
 /// Callback type for channel state changes.
-pub type ChannelStateChangeListener = Box<dyn Fn(&DxLinkChannelState, &DxLinkChannelState) + Send + Sync>;
+pub type ChannelStateChangeListener =
+    Box<dyn Fn(&DxLinkChannelState, &DxLinkChannelState) + Send + Sync>;
 
 /// Callback type for errors from the server.
 pub type ChannelErrorListener = Box<dyn Fn(&DxLinkError) + Send + Sync>;

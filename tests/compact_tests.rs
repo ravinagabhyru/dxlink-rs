@@ -1,12 +1,6 @@
 use dxlink_rs::{
-    core::{
-        auth::DxLinkAuthState,
-        client::DxLinkConnectionState,
-    },
-    feed::{
-        Feed, FeedAcceptConfig, FeedContract, FeedDataFormat, FeedEvent,
-        FeedOptions,
-    },
+    core::{auth::DxLinkAuthState, client::DxLinkConnectionState},
+    feed::{Feed, FeedAcceptConfig, FeedContract, FeedDataFormat, FeedEvent, FeedOptions},
     websocket_client::{DxLinkWebSocketClient, DxLinkWebSocketClientConfig},
 };
 use serde_json::json;
@@ -25,28 +19,32 @@ async fn create_test_client() -> Arc<Mutex<DxLinkWebSocketClient>> {
 
     // Set up connection and authentication state listeners
     let (conn_tx, mut conn_rx) = mpsc::channel(32);
-    client.add_connection_state_change_listener(Box::new({
-        let tx = conn_tx.clone();
-        move |new_state: &DxLinkConnectionState, _old: &DxLinkConnectionState| {
-            let new_state = *new_state;
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                tx.send(new_state).await.unwrap();
-            });
-        }
-    })).await;
+    client
+        .add_connection_state_change_listener(Box::new({
+            let tx = conn_tx.clone();
+            move |new_state: &DxLinkConnectionState, _old: &DxLinkConnectionState| {
+                let new_state = *new_state;
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    tx.send(new_state).await.unwrap();
+                });
+            }
+        }))
+        .await;
 
     let (auth_tx, mut auth_rx) = mpsc::channel(32);
-    client.add_auth_state_change_listener(Box::new({
-        let tx = auth_tx.clone();
-        move |new_state: &DxLinkAuthState, _old: &DxLinkAuthState| {
-            let new_state = *new_state;
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                tx.send(new_state).await.unwrap();
-            });
-        }
-    })).await;
+    client
+        .add_auth_state_change_listener(Box::new({
+            let tx = auth_tx.clone();
+            move |new_state: &DxLinkAuthState, _old: &DxLinkAuthState| {
+                let new_state = *new_state;
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    tx.send(new_state).await.unwrap();
+                });
+            }
+        }))
+        .await;
 
     // Connect to server
     let con = client.connect(DEMO_DXLINK_WS_URL.to_string()).await;
@@ -75,7 +73,10 @@ async fn create_test_client() -> Arc<Mutex<DxLinkWebSocketClient>> {
     assert_eq!(state, DxLinkAuthState::Authorized);
 
     // Make sure we are in a good state before proceeding
-    assert_eq!(client.get_connection_state().await, DxLinkConnectionState::Connected);
+    assert_eq!(
+        client.get_connection_state().await,
+        DxLinkConnectionState::Connected
+    );
     assert_eq!(client.get_auth_state().await, DxLinkAuthState::Authorized);
     tracing::debug!("Client states verified");
 
@@ -101,18 +102,21 @@ async fn test_compact_format_integration() {
     let config = FeedAcceptConfig {
         accept_aggregation_period: Some(1000.0),
         accept_data_format: Some(FeedDataFormat::Compact),
-        accept_event_fields: Some(HashMap::from([
-            ("Quote".to_string(), vec![
+        accept_event_fields: Some(HashMap::from([(
+            "Quote".to_string(),
+            vec![
                 "eventSymbol".to_string(),
                 "eventType".to_string(),
                 "bidPrice".to_string(),
                 "askPrice".to_string(),
                 "bidSize".to_string(),
                 "askSize".to_string(),
-            ]),
-        ])),
+            ],
+        )])),
     };
-    feed.configure(config).await.expect("Failed to configure feed");
+    feed.configure(config)
+        .await
+        .expect("Failed to configure feed");
 
     // Subscribe to data events
     let mut rx = feed.subscribe_to_data_events();
@@ -159,7 +163,9 @@ async fn test_full_format_fallback() {
         accept_data_format: Some(FeedDataFormat::Full),
         accept_event_fields: None,
     };
-    feed.configure(config).await.expect("Failed to configure feed");
+    feed.configure(config)
+        .await
+        .expect("Failed to configure feed");
 
     // Subscribe to data events
     let mut rx = feed.subscribe_to_data_events();

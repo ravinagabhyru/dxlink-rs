@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 use std::fmt;
+use thiserror::Error;
 
 /// Error type that represents different kinds of errors that can occur
 /// in the dxLink protocol.
@@ -85,10 +85,11 @@ pub enum ChannelError {
     #[error("Send error: {0}")]
     SendError(String),
 
+    #[error("Invalid channel {channel}: {reason}")]
+    InvalidChannel { channel: u64, reason: String },
+
     #[error("Operation timeout after {timeout_secs} seconds")]
-    Timeout {
-        timeout_secs: u64,
-    },
+    Timeout { timeout_secs: u64 },
 
     #[error("Channel closed")]
     Closed,
@@ -120,6 +121,10 @@ impl From<ChannelError> for DxLinkError {
                 error_type: DxLinkErrorType::Unknown,
                 message: err.to_string(),
             },
+            ChannelError::InvalidChannel { .. } => DxLinkError {
+                error_type: DxLinkErrorType::BadAction,
+                message: err.to_string(),
+            },
             ChannelError::Timeout { .. } => DxLinkError {
                 error_type: DxLinkErrorType::Timeout,
                 message: err.to_string(),
@@ -139,8 +144,8 @@ impl From<ChannelError> for DxLinkError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
     fn test_error_creation() {
@@ -152,10 +157,7 @@ mod tests {
     #[test]
     fn test_error_display() {
         let error = DxLinkError::new(DxLinkErrorType::InvalidMessage, "Invalid JSON");
-        assert_eq!(
-            format!("{}", error),
-            "InvalidMessage: Invalid JSON"
-        );
+        assert_eq!(format!("{}", error), "InvalidMessage: Invalid JSON");
     }
 
     #[test]
@@ -194,7 +196,10 @@ mod tests {
         // Test all possible error types from JSON
         let json_values = [
             (json!("timeout"), DxLinkErrorType::Timeout),
-            (json!("unsupported_protocol"), DxLinkErrorType::UnsupportedProtocol),
+            (
+                json!("unsupported_protocol"),
+                DxLinkErrorType::UnsupportedProtocol,
+            ),
             (json!("unauthorized"), DxLinkErrorType::Unauthorized),
             (json!("invalid_message"), DxLinkErrorType::InvalidMessage),
             (json!("bad_action"), DxLinkErrorType::BadAction),
@@ -222,12 +227,15 @@ mod tests {
         ];
 
         for (error_str, expected_type) in error_types {
-            let json = format!(r#"{{
+            let json = format!(
+                r#"{{
                 "type": "ERROR",
                 "channel": 0,
                 "error": "{}",
                 "message": "Error description"
-            }}"#, error_str);
+            }}"#,
+                error_str
+            );
 
             let msg: ErrorMessage = serde_json::from_str(&json).unwrap();
             assert_eq!(msg.message_type, "ERROR");
@@ -236,38 +244,70 @@ mod tests {
             assert_eq!(msg.message, "Error description");
         }
     }
-    
+
     #[test]
     fn test_detailed_error_message_parsing() {
         use crate::websocket_client::messages::ErrorMessage;
-        
+
         // Test parsing ERROR messages with different channel IDs and error types
         let test_cases = [
             // Connection-level errors (channel 0)
-            (0, "timeout", "Connection timed out", DxLinkErrorType::Timeout),
-            (0, "unsupported_protocol", "Protocol version not supported", DxLinkErrorType::UnsupportedProtocol),
-            (0, "unauthorized", "Authentication failed", DxLinkErrorType::Unauthorized),
-            
+            (
+                0,
+                "timeout",
+                "Connection timed out",
+                DxLinkErrorType::Timeout,
+            ),
+            (
+                0,
+                "unsupported_protocol",
+                "Protocol version not supported",
+                DxLinkErrorType::UnsupportedProtocol,
+            ),
+            (
+                0,
+                "unauthorized",
+                "Authentication failed",
+                DxLinkErrorType::Unauthorized,
+            ),
             // Channel-specific errors
-            (1, "invalid_message", "Invalid subscription format", DxLinkErrorType::InvalidMessage),
-            (2, "bad_action", "Cannot subscribe while channel is closing", DxLinkErrorType::BadAction),
-            (5, "timeout", "Operation timed out", DxLinkErrorType::Timeout),
+            (
+                1,
+                "invalid_message",
+                "Invalid subscription format",
+                DxLinkErrorType::InvalidMessage,
+            ),
+            (
+                2,
+                "bad_action",
+                "Cannot subscribe while channel is closing",
+                DxLinkErrorType::BadAction,
+            ),
+            (
+                5,
+                "timeout",
+                "Operation timed out",
+                DxLinkErrorType::Timeout,
+            ),
         ];
-        
+
         for (channel, error_type, message, expected_type) in test_cases {
-            let json = format!(r#"{{
+            let json = format!(
+                r#"{{
                 "type": "ERROR",
                 "channel": {},
                 "error": "{}",
                 "message": "{}"
-            }}"#, channel, error_type, message);
-            
+            }}"#,
+                channel, error_type, message
+            );
+
             let msg: ErrorMessage = serde_json::from_str(&json).unwrap();
             assert_eq!(msg.message_type, "ERROR");
             assert_eq!(msg.channel, channel);
             assert_eq!(msg.error, expected_type);
             assert_eq!(msg.message, message);
-            
+
             // Verify the error can be converted to a DxLinkError
             let error = DxLinkError::new(msg.error, msg.message.clone());
             assert_eq!(error.error_type, expected_type);
@@ -313,10 +353,7 @@ mod tests {
                 ChannelError::Timeout { timeout_secs: 30 },
                 DxLinkErrorType::Timeout,
             ),
-            (
-                ChannelError::Closed,
-                DxLinkErrorType::BadAction,
-            ),
+            (ChannelError::Closed, DxLinkErrorType::BadAction),
         ];
 
         for (channel_error, expected_type) in channel_errors {

@@ -56,7 +56,8 @@ pub struct DxLinkConnectionDetails {
 }
 
 /// Callback type for connection state changes.
-pub type ConnectionStateChangeListener = Box<dyn Fn(&DxLinkConnectionState, &DxLinkConnectionState) + Send + Sync>;
+pub type ConnectionStateChangeListener =
+    Box<dyn Fn(&DxLinkConnectionState, &DxLinkConnectionState) + Send + Sync>;
 
 // dxLink client that can be used to connect to the remote dxLink endpoint and open channels to services.
 // #[async_trait::async_trait]

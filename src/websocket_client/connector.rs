@@ -10,13 +10,12 @@ use tracing::{debug, error, warn};
 
 use crate::feed::messages::FeedConfigMessage;
 use crate::feed::messages::FeedDataMessage;
-use crate::DomConfigMessage;
-use crate::DomSnapshotMessage;
 use crate::websocket_client::messages::{
-    AuthStateMessage, ChannelClosedMessage, ChannelOpenedMessage,
-    ErrorMessage, KeepaliveMessage,
+    AuthStateMessage, ChannelClosedMessage, ChannelOpenedMessage, ErrorMessage, KeepaliveMessage,
     Message, MessageType, SetupMessage,
 };
+use crate::DomConfigMessage;
+use crate::DomSnapshotMessage;
 
 type WebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 // use std::hash::{Hash, Hasher};
@@ -115,7 +114,11 @@ impl WebSocketConnector {
 
         let payload = message.payload();
         let json = serde_json::to_string(&payload)?;
-        tracing::info!("Sending WebSocket message type: {}, channel: {}", message.message_type(), message.channel());
+        tracing::info!(
+            "Sending WebSocket message type: {}, channel: {}",
+            message.message_type(),
+            message.channel()
+        );
         tracing::info!("Raw message payload: {}", json);
 
         if let Some(write) = self.write_stream.lock().await.as_mut() {
@@ -150,7 +153,9 @@ impl WebSocketConnector {
     }
 
     /// Read the next message from the WebSocket stream
-    pub async fn read_next_message(&self) -> Option<Result<WsMessage, tokio_tungstenite::tungstenite::Error>> {
+    pub async fn read_next_message(
+        &self,
+    ) -> Option<Result<WsMessage, tokio_tungstenite::tungstenite::Error>> {
         if let Some(stream) = self.read_stream.lock().await.as_mut() {
             stream.next().await
         } else {
@@ -159,53 +164,90 @@ impl WebSocketConnector {
     }
 
     /// Parse a WebSocket message into a dxLink message
-    pub fn parse_message(msg: WsMessage) -> Result<Box<dyn Message + Send + Sync>, serde_json::Error> {
+    pub fn parse_message(
+        msg: WsMessage,
+    ) -> Result<Box<dyn Message + Send + Sync>, serde_json::Error> {
         match msg {
             WsMessage::Text(text) => {
                 let value: Value = serde_json::from_str(&text)?;
                 let msg_type = value["type"].as_str().unwrap_or("");
 
-                let message_result: Result<Box<dyn Message + Send + Sync>, serde_json::Error> = match msg_type {
-                    // Connection/authentication messages
-                    "SETUP" => serde_json::from_value::<SetupMessage>(value.clone())
-                        .map(|m| Box::new(MessageType::Setup(m)) as Box<dyn Message + Send + Sync>),
+                let message_result: Result<Box<dyn Message + Send + Sync>, serde_json::Error> =
+                    match msg_type {
+                        // Connection/authentication messages
+                        "SETUP" => serde_json::from_value::<SetupMessage>(value.clone()).map(|m| {
+                            Box::new(MessageType::Setup(m)) as Box<dyn Message + Send + Sync>
+                        }),
 
-                    "AUTH_STATE" => serde_json::from_value::<AuthStateMessage>(value.clone())
-                        .map(|m| Box::new(MessageType::AuthState(m)) as Box<dyn Message + Send + Sync>),
+                        "AUTH_STATE" => serde_json::from_value::<AuthStateMessage>(value.clone())
+                            .map(|m| {
+                                Box::new(MessageType::AuthState(m))
+                                    as Box<dyn Message + Send + Sync>
+                            }),
 
-                    "KEEPALIVE" => serde_json::from_value::<KeepaliveMessage>(value.clone())
-                        .map(|m| Box::new(MessageType::KeepAlive(m)) as Box<dyn Message + Send + Sync>),
+                        "KEEPALIVE" => serde_json::from_value::<KeepaliveMessage>(value.clone())
+                            .map(|m| {
+                                Box::new(MessageType::KeepAlive(m))
+                                    as Box<dyn Message + Send + Sync>
+                            }),
 
-                    // Channel lifecycle messages
-                    "CHANNEL_OPENED" => serde_json::from_value::<ChannelOpenedMessage>(value.clone())
-                        .map(|m| Box::new(MessageType::ChannelOpened(m)) as Box<dyn Message + Send + Sync>),
+                        // Channel lifecycle messages
+                        "CHANNEL_OPENED" => {
+                            serde_json::from_value::<ChannelOpenedMessage>(value.clone()).map(|m| {
+                                Box::new(MessageType::ChannelOpened(m))
+                                    as Box<dyn Message + Send + Sync>
+                            })
+                        }
 
-                    "CHANNEL_CLOSED" => serde_json::from_value::<ChannelClosedMessage>(value.clone())
-                        .map(|m| Box::new(MessageType::ChannelClosed(m)) as Box<dyn Message + Send + Sync>),
+                        "CHANNEL_CLOSED" => {
+                            serde_json::from_value::<ChannelClosedMessage>(value.clone()).map(|m| {
+                                Box::new(MessageType::ChannelClosed(m))
+                                    as Box<dyn Message + Send + Sync>
+                            })
+                        }
 
-                    "ERROR" => serde_json::from_value::<ErrorMessage>(value.clone())
-                        .map(|m| Box::new(MessageType::Error(m)) as Box<dyn Message + Send + Sync>),
+                        "ERROR" => serde_json::from_value::<ErrorMessage>(value.clone()).map(|m| {
+                            Box::new(MessageType::Error(m)) as Box<dyn Message + Send + Sync>
+                        }),
 
-                    // FEED messages
-                    "FEED_CONFIG" => serde_json::from_value::<FeedConfigMessage>(value.clone())
-                        .map(|m| Box::new(MessageType::FeedConfig(m)) as Box<dyn Message + Send + Sync>),
+                        // FEED messages
+                        "FEED_CONFIG" => serde_json::from_value::<FeedConfigMessage>(value.clone())
+                            .map(|m| {
+                                Box::new(MessageType::FeedConfig(m))
+                                    as Box<dyn Message + Send + Sync>
+                            }),
 
-                    "FEED_DATA" => serde_json::from_value::<FeedDataMessage>(value.clone())
-                        .map(|m| Box::new(MessageType::FeedData(m)) as Box<dyn Message + Send + Sync>),
+                        "FEED_DATA" => serde_json::from_value::<FeedDataMessage>(value.clone())
+                            .map(|m| {
+                                Box::new(MessageType::FeedData(m)) as Box<dyn Message + Send + Sync>
+                            }),
 
-                    // DOM messages
-                    "DOM_CONFIG" => serde_json::from_value::<DomConfigMessage>(value.clone())
-                        .map(|m| Box::new(MessageType::DomConfig(m)) as Box<dyn Message + Send + Sync>),
+                        // DOM messages
+                        "DOM_CONFIG" => serde_json::from_value::<DomConfigMessage>(value.clone())
+                            .map(|m| {
+                                Box::new(MessageType::DomConfig(m))
+                                    as Box<dyn Message + Send + Sync>
+                            }),
 
-                    "DOM_SNAPSHOT" => serde_json::from_value::<DomSnapshotMessage>(value.clone())
-                        .map(|m| Box::new(MessageType::DomSnapshot(m)) as Box<dyn Message + Send + Sync>),
+                        "DOM_SNAPSHOT" => {
+                            serde_json::from_value::<DomSnapshotMessage>(value.clone()).map(|m| {
+                                Box::new(MessageType::DomSnapshot(m))
+                                    as Box<dyn Message + Send + Sync>
+                            })
+                        }
 
-                    _ => Err(serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Unknown message type: {}", msg_type)))),
-                };
+                        _ => Err(serde_json::Error::io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("Unknown message type: {}", msg_type),
+                        ))),
+                    };
 
                 message_result
             }
-            _ => Err(serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::InvalidData, "Expected text message"))),
+            _ => Err(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Expected text message",
+            ))),
         }
     }
 
@@ -254,60 +296,91 @@ impl WebSocketConnector {
             );
 
             // 3. Use a match statement on the extracted type string
-            let message_result: Result<Box<dyn Message + Send + Sync>, serde_json::Error> = match msg_type {
-                // Connection/authentication messages
-                "SETUP" => serde_json::from_value::<SetupMessage>(value.clone())
-                    .map(|m| Box::new(MessageType::Setup(m)) as Box<dyn Message + Send + Sync>),
+            let message_result: Result<Box<dyn Message + Send + Sync>, serde_json::Error> =
+                match msg_type {
+                    // Connection/authentication messages
+                    "SETUP" => serde_json::from_value::<SetupMessage>(value.clone())
+                        .map(|m| Box::new(MessageType::Setup(m)) as Box<dyn Message + Send + Sync>),
 
-                "AUTH_STATE" => serde_json::from_value::<AuthStateMessage>(value.clone())
-                    .map(|m| Box::new(MessageType::AuthState(m)) as Box<dyn Message + Send + Sync>),
+                    "AUTH_STATE" => {
+                        serde_json::from_value::<AuthStateMessage>(value.clone()).map(|m| {
+                            Box::new(MessageType::AuthState(m)) as Box<dyn Message + Send + Sync>
+                        })
+                    }
 
-                "KEEPALIVE" => serde_json::from_value::<KeepaliveMessage>(value.clone())
-                    .map(|m| Box::new(MessageType::KeepAlive(m)) as Box<dyn Message + Send + Sync>),
+                    "KEEPALIVE" => {
+                        serde_json::from_value::<KeepaliveMessage>(value.clone()).map(|m| {
+                            Box::new(MessageType::KeepAlive(m)) as Box<dyn Message + Send + Sync>
+                        })
+                    }
 
-                // Channel lifecycle messages
-                "CHANNEL_OPENED" => serde_json::from_value::<ChannelOpenedMessage>(value.clone())
-                    .map(|m| Box::new(MessageType::ChannelOpened(m)) as Box<dyn Message + Send + Sync>),
+                    // Channel lifecycle messages
+                    "CHANNEL_OPENED" => {
+                        serde_json::from_value::<ChannelOpenedMessage>(value.clone()).map(|m| {
+                            Box::new(MessageType::ChannelOpened(m))
+                                as Box<dyn Message + Send + Sync>
+                        })
+                    }
 
-                "CHANNEL_CLOSED" => serde_json::from_value::<ChannelClosedMessage>(value.clone())
-                    .map(|m| Box::new(MessageType::ChannelClosed(m)) as Box<dyn Message + Send + Sync>),
+                    "CHANNEL_CLOSED" => {
+                        serde_json::from_value::<ChannelClosedMessage>(value.clone()).map(|m| {
+                            Box::new(MessageType::ChannelClosed(m))
+                                as Box<dyn Message + Send + Sync>
+                        })
+                    }
 
-                "ERROR" => serde_json::from_value::<ErrorMessage>(value.clone())
-                    .map(|m| Box::new(MessageType::Error(m)) as Box<dyn Message + Send + Sync>),
+                    "ERROR" => serde_json::from_value::<ErrorMessage>(value.clone())
+                        .map(|m| Box::new(MessageType::Error(m)) as Box<dyn Message + Send + Sync>),
 
-                // FEED messages
-                "FEED_CONFIG" => serde_json::from_value::<FeedConfigMessage>(value.clone())
-                    .map(|m| Box::new(MessageType::FeedConfig(m)) as Box<dyn Message + Send + Sync>),
+                    // FEED messages
+                    "FEED_CONFIG" => serde_json::from_value::<FeedConfigMessage>(value.clone())
+                        .map(|m| {
+                            Box::new(MessageType::FeedConfig(m)) as Box<dyn Message + Send + Sync>
+                        }),
 
-                "FEED_DATA" => serde_json::from_value::<FeedDataMessage>(value.clone())
-                    .map(|m| Box::new(MessageType::FeedData(m)) as Box<dyn Message + Send + Sync>),
+                    "FEED_DATA" => {
+                        serde_json::from_value::<FeedDataMessage>(value.clone()).map(|m| {
+                            Box::new(MessageType::FeedData(m)) as Box<dyn Message + Send + Sync>
+                        })
+                    }
 
-                // DOM messages
-                "DOM_CONFIG" => serde_json::from_value::<DomConfigMessage>(value.clone())
-                    .map(|m| Box::new(MessageType::DomConfig(m)) as Box<dyn Message + Send + Sync>),
+                    // DOM messages
+                    "DOM_CONFIG" => {
+                        serde_json::from_value::<DomConfigMessage>(value.clone()).map(|m| {
+                            Box::new(MessageType::DomConfig(m)) as Box<dyn Message + Send + Sync>
+                        })
+                    }
 
-                "DOM_SNAPSHOT" => serde_json::from_value::<DomSnapshotMessage>(value.clone())
-                    .map(|m| Box::new(MessageType::DomSnapshot(m)) as Box<dyn Message + Send + Sync>),
+                    "DOM_SNAPSHOT" => serde_json::from_value::<DomSnapshotMessage>(value.clone())
+                        .map(|m| {
+                            Box::new(MessageType::DomSnapshot(m)) as Box<dyn Message + Send + Sync>
+                        }),
 
-                // Unknown message type
-                _ => {
-                    warn!("Unknown message type received: {}", msg_type);
-                    return Err(format!("Unknown message type: {}", msg_type).into());
-                }
-            };
+                    // Unknown message type
+                    _ => {
+                        warn!("Unknown message type received: {}", msg_type);
+                        return Err(format!("Unknown message type: {}", msg_type).into());
+                    }
+                };
 
             // 4. Process the deserialization result
             let message = match message_result {
                 Ok(msg) => msg,
                 Err(e) => {
-                    error!("Failed to deserialize {} message: {}: {}", msg_type, e, text);
+                    error!(
+                        "Failed to deserialize {} message: {}: {}",
+                        msg_type, e, text
+                    );
                     return Err(format!("Failed to deserialize {} message: {}", msg_type, e).into());
                 }
             };
 
             // 5. Pass the boxed message to the message_listener
             if let Some(listener) = message_listener.lock().await.as_ref() {
-                debug!("Forwarding message to listener: type={}", message.message_type());
+                debug!(
+                    "Forwarding message to listener: type={}",
+                    message.message_type()
+                );
                 listener(message);
             } else {
                 warn!("No message listener set for message: {}", text);
@@ -369,10 +442,10 @@ impl WebSocketConnector {
 
 #[cfg(test)]
 mod tests {
-    use crate::{DxLinkErrorType, FeedDataFormat};
-    use crate::feed::messages::FeedData;
     use crate::feed::events::FeedEvent;
     use crate::feed::events::JSONDouble;
+    use crate::feed::messages::FeedData;
+    use crate::{DxLinkErrorType, FeedDataFormat};
 
     use super::*;
     use std::sync::Arc;
@@ -426,7 +499,11 @@ mod tests {
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
 
         // Verify the message was processed successfully
-        assert!(result.is_ok(), "handle_message returned an error: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "handle_message returned an error: {:?}",
+            result
+        );
 
         // Verify the message was forwarded to the listener
         let received_msg = rx.recv().await.expect("No message received from listener");
@@ -436,7 +513,9 @@ mod tests {
 
         // Verify the message is a SetupMessage
         let msg_any = received_msg.as_any();
-        let msg_type = msg_any.downcast_ref::<MessageType>().expect("Not a MessageType");
+        let msg_type = msg_any
+            .downcast_ref::<MessageType>()
+            .expect("Not a MessageType");
 
         if let MessageType::Setup(setup_msg) = msg_type {
             assert_eq!(setup_msg.channel, 0);
@@ -463,14 +542,19 @@ mod tests {
         let message_listener = Arc::new(Mutex::new(Some(message_listener)));
 
         // Create a valid FEED_CONFIG message
-        let feed_config_json = r#"{"type":"FEED_CONFIG","channel":1,"aggregationPeriod":1000,"dataFormat":"FULL"}"#;
+        let feed_config_json =
+            r#"{"type":"FEED_CONFIG","channel":1,"aggregationPeriod":1000,"dataFormat":"FULL"}"#;
         let ws_message = WsMessage::Text(feed_config_json.to_string());
 
         // Process the message
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
 
         // Verify the message was processed successfully
-        assert!(result.is_ok(), "handle_message returned an error: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "handle_message returned an error: {:?}",
+            result
+        );
 
         // Verify the message was forwarded to the listener
         let received_msg = rx.recv().await.expect("No message received from listener");
@@ -480,7 +564,9 @@ mod tests {
 
         // Verify the message is a FeedConfigMessage
         let msg_any = received_msg.as_any();
-        let msg_type = msg_any.downcast_ref::<MessageType>().expect("Not a MessageType");
+        let msg_type = msg_any
+            .downcast_ref::<MessageType>()
+            .expect("Not a MessageType");
 
         if let MessageType::FeedConfig(feed_config_msg) = msg_type {
             assert_eq!(feed_config_msg.channel, 1);
@@ -514,7 +600,11 @@ mod tests {
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
 
         // Verify the message was processed successfully
-        assert!(result.is_ok(), "handle_message returned an error: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "handle_message returned an error: {:?}",
+            result
+        );
 
         // Verify the message was forwarded to the listener
         let received_msg = rx.recv().await.expect("No message received from listener");
@@ -524,7 +614,9 @@ mod tests {
 
         // Verify the message is a DomSnapshotMessage
         let msg_any = received_msg.as_any();
-        let msg_type = msg_any.downcast_ref::<MessageType>().expect("Not a MessageType");
+        let msg_type = msg_any
+            .downcast_ref::<MessageType>()
+            .expect("Not a MessageType");
 
         if let MessageType::DomSnapshot(dom_snapshot_msg) = msg_type {
             assert_eq!(dom_snapshot_msg.channel, 2);
@@ -538,6 +630,56 @@ mod tests {
         } else {
             panic!("Not a DomSnapshotMessage");
         }
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_dom_config() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let message_listener: MessageListener = Box::new(move |msg| {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let _ = tx.send(msg).await;
+            });
+        });
+
+        let message_listener = Arc::new(Mutex::new(Some(message_listener)));
+
+        let dom_config_json = r#"{"type":"DOM_CONFIG","channel":3,"aggregationPeriod":250,"depthLimit":4,"dataFormat":"FULL","orderFields":["price","size"]}"#;
+        let ws_message = WsMessage::Text(dom_config_json.to_string());
+
+        let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
+        assert!(result.is_ok());
+
+        let received_msg = rx.recv().await.expect("No message received from listener");
+        let msg_type = received_msg
+            .as_any()
+            .downcast_ref::<MessageType>()
+            .expect("Not a MessageType");
+
+        match msg_type {
+            MessageType::DomConfig(config_msg) => {
+                assert_eq!(config_msg.channel, 3);
+                assert_eq!(config_msg.aggregation_period, 250);
+                assert_eq!(config_msg.depth_limit, 4);
+                assert_eq!(config_msg.order_fields, vec!["price", "size"]);
+            }
+            _ => panic!("Expected DomConfig message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_invalid_dom_payload() {
+        let message_listener: MessageListener = Box::new(move |_| {
+            panic!("Message listener should not be called for invalid DOM payload");
+        });
+
+        let message_listener = Arc::new(Mutex::new(Some(message_listener)));
+
+        let invalid_dom = r#"{"type":"DOM_SNAPSHOT","channel":1,"time":1,"bids":[{"price":"bad","size":1}],"asks":[]}"#;
+        let ws_message = WsMessage::Text(invalid_dom.to_string());
+
+        let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -557,7 +699,10 @@ mod tests {
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
 
         // Verify that an error was returned
-        assert!(result.is_err(), "handle_message should return an error for invalid JSON");
+        assert!(
+            result.is_err(),
+            "handle_message should return an error for invalid JSON"
+        );
     }
 
     #[tokio::test]
@@ -575,13 +720,19 @@ mod tests {
         let missing_type = r#"{"channel":0,"version":"1.0"}"#;
         let ws_message = WsMessage::Text(missing_type.to_string());
         let result = WebSocketConnector::handle_message(ws_message, message_listener.clone()).await;
-        assert!(result.is_err(), "handle_message should return an error for missing type");
+        assert!(
+            result.is_err(),
+            "handle_message should return an error for missing type"
+        );
 
         // Missing channel
         let missing_channel = r#"{"type":"SETUP","version":"1.0"}"#;
         let ws_message = WsMessage::Text(missing_channel.to_string());
         let result = WebSocketConnector::handle_message(ws_message, message_listener.clone()).await;
-        assert!(result.is_err(), "handle_message should return an error for missing channel");
+        assert!(
+            result.is_err(),
+            "handle_message should return an error for missing channel"
+        );
     }
 
     #[tokio::test]
@@ -601,10 +752,17 @@ mod tests {
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
 
         // Verify that an error was returned
-        assert!(result.is_err(), "handle_message should return an error for unknown message types");
+        assert!(
+            result.is_err(),
+            "handle_message should return an error for unknown message types"
+        );
         let err = result.unwrap_err();
         let err_str = err.to_string();
-        assert!(err_str.contains("Unknown message type"), "Error message should indicate unknown type: {}", err_str);
+        assert!(
+            err_str.contains("Unknown message type"),
+            "Error message should indicate unknown type: {}",
+            err_str
+        );
     }
 
     #[tokio::test]
@@ -624,7 +782,10 @@ mod tests {
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
 
         // Verify that an error was returned
-        assert!(result.is_err(), "handle_message should return an error for invalid field values");
+        assert!(
+            result.is_err(),
+            "handle_message should return an error for invalid field values"
+        );
     }
 
     // Additional tests for Task 10: Testing handle_message for multiple message types and error cases
@@ -652,7 +813,11 @@ mod tests {
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
 
         // Verify the message was processed successfully
-        assert!(result.is_ok(), "handle_message returned an error: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "handle_message returned an error: {:?}",
+            result
+        );
 
         // Verify the message was forwarded to the listener
         let received_msg = rx.recv().await.expect("No message received from listener");
@@ -662,7 +827,9 @@ mod tests {
 
         // Verify the message is an AuthStateMessage
         let msg_any = received_msg.as_any();
-        let msg_type = msg_any.downcast_ref::<MessageType>().expect("Not a MessageType");
+        let msg_type = msg_any
+            .downcast_ref::<MessageType>()
+            .expect("Not a MessageType");
 
         if let MessageType::AuthState(auth_state_msg) = msg_type {
             assert_eq!(auth_state_msg.channel, 0);
@@ -695,7 +862,11 @@ mod tests {
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
 
         // Verify the message was processed successfully
-        assert!(result.is_ok(), "handle_message returned an error: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "handle_message returned an error: {:?}",
+            result
+        );
 
         // Verify the message was forwarded to the listener
         let received_msg = rx.recv().await.expect("No message received from listener");
@@ -705,7 +876,9 @@ mod tests {
 
         // Verify the message is a KeepaliveMessage
         let msg_any = received_msg.as_any();
-        let msg_type = msg_any.downcast_ref::<MessageType>().expect("Not a MessageType");
+        let msg_type = msg_any
+            .downcast_ref::<MessageType>()
+            .expect("Not a MessageType");
 
         if let MessageType::KeepAlive(keepalive_msg) = msg_type {
             assert_eq!(keepalive_msg.channel, 0);
@@ -716,48 +889,55 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_message_error_message() {
-            // Create a channel to receive the parsed message
-            let (tx, mut rx) = mpsc::channel(1);
+        // Create a channel to receive the parsed message
+        let (tx, mut rx) = mpsc::channel(1);
 
-            // Create a message listener
-            let message_listener: MessageListener = Box::new(move |msg| {
-                let tx = tx.clone();
-                tokio::spawn(async move {
-                    let _ = tx.send(msg).await;
-                });
+        // Create a message listener
+        let message_listener: MessageListener = Box::new(move |msg| {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let _ = tx.send(msg).await;
             });
+        });
 
-            let message_listener = Arc::new(Mutex::new(Some(message_listener)));
+        let message_listener = Arc::new(Mutex::new(Some(message_listener)));
 
-            // Create a valid ERROR message with the correct enum value (lowercase due to #[serde(rename_all = "snake_case")])
-            let error_json = r#"{"type":"ERROR","channel":0,"error":"timeout","message":"Connection timed out"}"#;
-            let ws_message = WsMessage::Text(error_json.to_string());
+        // Create a valid ERROR message with the correct enum value (lowercase due to #[serde(rename_all = "snake_case")])
+        let error_json =
+            r#"{"type":"ERROR","channel":0,"error":"timeout","message":"Connection timed out"}"#;
+        let ws_message = WsMessage::Text(error_json.to_string());
 
-            // Process the message
-            let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
+        // Process the message
+        let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
 
-            // Verify the message was processed successfully
-            assert!(result.is_ok(), "handle_message returned an error: {:?}", result);
+        // Verify the message was processed successfully
+        assert!(
+            result.is_ok(),
+            "handle_message returned an error: {:?}",
+            result
+        );
 
-            // Verify the message was forwarded to the listener
-            let received_msg = rx.recv().await.expect("No message received from listener");
+        // Verify the message was forwarded to the listener
+        let received_msg = rx.recv().await.expect("No message received from listener");
 
-            // Verify the message type is correct
-            assert_eq!(received_msg.message_type(), "ERROR");
+        // Verify the message type is correct
+        assert_eq!(received_msg.message_type(), "ERROR");
 
-            // Verify the message is an ErrorMessage
-            let msg_any = received_msg.as_any();
-            let msg_type = msg_any.downcast_ref::<MessageType>().expect("Not a MessageType");
+        // Verify the message is an ErrorMessage
+        let msg_any = received_msg.as_any();
+        let msg_type = msg_any
+            .downcast_ref::<MessageType>()
+            .expect("Not a MessageType");
 
-            if let MessageType::Error(error_msg) = msg_type {
-                assert_eq!(error_msg.channel, 0);
-                // Check the error type as a string representation
-                assert_eq!(error_msg.error, DxLinkErrorType::Timeout);
-                assert_eq!(error_msg.message, "Connection timed out");
-            } else {
-                panic!("Not an ErrorMessage");
-            }
+        if let MessageType::Error(error_msg) = msg_type {
+            assert_eq!(error_msg.channel, 0);
+            // Check the error type as a string representation
+            assert_eq!(error_msg.error, DxLinkErrorType::Timeout);
+            assert_eq!(error_msg.message, "Connection timed out");
+        } else {
+            panic!("Not an ErrorMessage");
         }
+    }
 
     #[tokio::test]
     async fn test_connector_parses_feed_data_full() {
@@ -795,7 +975,11 @@ mod tests {
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
 
         // Verify the message was processed successfully
-        assert!(result.is_ok(), "handle_message returned an error: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "handle_message returned an error: {:?}",
+            result
+        );
 
         // Verify the message was forwarded to the listener
         let received_msg = rx.recv().await.expect("No message received from listener");
@@ -805,7 +989,9 @@ mod tests {
 
         // Verify the message is a FeedDataMessage
         let msg_any = received_msg.as_any();
-        let msg_type = msg_any.downcast_ref::<MessageType>().expect("Not a MessageType");
+        let msg_type = msg_any
+            .downcast_ref::<MessageType>()
+            .expect("Not a MessageType");
 
         if let MessageType::FeedData(feed_data_msg) = msg_type {
             assert_eq!(feed_data_msg.channel, 1);
@@ -859,7 +1045,11 @@ mod tests {
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
 
         // Verify the message was processed successfully
-        assert!(result.is_ok(), "handle_message returned an error: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "handle_message returned an error: {:?}",
+            result
+        );
 
         // Verify the message was forwarded to the listener
         let received_msg = rx.recv().await.expect("No message received from listener");
@@ -869,7 +1059,9 @@ mod tests {
 
         // Verify the message is a FeedDataMessage
         let msg_any = received_msg.as_any();
-        let msg_type = msg_any.downcast_ref::<MessageType>().expect("Not a MessageType");
+        let msg_type = msg_any
+            .downcast_ref::<MessageType>()
+            .expect("Not a MessageType");
 
         if let MessageType::FeedData(feed_data_msg) = msg_type {
             assert_eq!(feed_data_msg.channel, 1);
