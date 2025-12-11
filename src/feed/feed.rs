@@ -146,7 +146,7 @@ impl Feed {
                                 });
                             }
                         } else if type_str == "FEED_DATA" {
-                            tracing::info!("Received FEED_DATA message: {:?}", value);
+                            tracing::debug!("Received FEED_DATA message: {:?}", value);
                             // Parse the message payload as FeedDataMessage
                             if let Ok(feed_data) = serde_json::from_value::<FeedDataMessage>(message.payload.clone()) {
                                 tokio::spawn({
@@ -156,7 +156,7 @@ impl Feed {
                                         let config = config_ref.lock().await.clone();
                                         match &feed_data.data {
                                             FeedData::Full(events) => {
-                                                tracing::info!("Processing {} full format events", events.len());
+                                                tracing::debug!("Processing {} full format events", events.len());
                                                 // Forward each event to listeners
                                                 for event in events {
                                                     tracing::debug!("Forwarding event: {:?}", event);
@@ -164,12 +164,12 @@ impl Feed {
                                                 }
                                             },
                                             FeedData::Compact(_data) => {
-                                                tracing::info!("Processing compact format data");
+                                                tracing::debug!("Processing compact format data");
                                                 // Process compact data if we have event fields configuration
                                                 if let Some(ref fields) = config.event_fields {
                                                     match feed_data.data.compact_to_full(fields) {
                                                         Ok(events) => {
-                                                            tracing::info!("Converted compact data to {} events", events.len());
+                                                            tracing::debug!("Converted compact data to {} events", events.len());
                                                             for event in events {
                                                                 tracing::debug!("Forwarding event: {:?}", event);
                                                                 let _ = data_tx.send(event);
