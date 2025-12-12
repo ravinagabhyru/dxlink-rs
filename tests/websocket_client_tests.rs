@@ -224,7 +224,8 @@ async fn test_feed_channel_request_and_close() {
     // Open a FEED channel
     let channel = client
         .open_channel("FEED".to_string(), json!({"contract": "AUTO"}))
-        .await;
+        .await
+        .expect("Failed to open channel");
 
     // Verify channel is created
     assert_eq!((*channel).id, 1);
@@ -453,7 +454,8 @@ async fn test_feed_subscription() {
     // Create the channel
     let channel = client
         .open_channel("FEED".to_string(), json!({"contract": "AUTO"}))
-        .await;
+        .await
+        .expect("Failed to open channel");
     tracing::debug!("Channel created");
 
     // Add the listeners to the channel

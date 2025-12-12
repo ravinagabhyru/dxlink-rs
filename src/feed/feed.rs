@@ -114,7 +114,7 @@ impl Feed {
             .lock()
             .await
             .open_channel(FEED_SERVICE_NAME.to_string(), parameters)
-            .await;
+            .await?;
 
         // Setup message listeners
         let config_clone = Arc::new(Mutex::new(FeedConfig::default()));
@@ -133,15 +133,29 @@ impl Feed {
                         if type_str == "FEED_CONFIG" {
                             // Parse the message payload as FeedConfigMessage
                             if let Ok(feed_config) = serde_json::from_value::<FeedConfigMessage>(message.payload.clone()) {
+                                tracing::debug!("Received FEED_CONFIG: data_format={:?}, event_fields={:?}",
+                                    feed_config.data_format, feed_config.event_fields);
                                 tokio::spawn({
                                     let config_ref = config_ref.clone();
                                     async move {
-                                        let new_config = FeedConfig {
-                                            aggregation_period: feed_config.aggregation_period,
-                                            data_format: feed_config.data_format,
-                                            event_fields: feed_config.event_fields.clone(),
-                                        };
-                                        *config_ref.lock().await = new_config;
+                                        let mut config = config_ref.lock().await;
+                                        // Update aggregation period and data format
+                                        config.aggregation_period = feed_config.aggregation_period;
+                                        config.data_format = feed_config.data_format;
+                                        // Merge event_fields instead of replacing
+                                        // Server sends separate FEED_CONFIG for each event type
+                                        if let Some(new_fields) = feed_config.event_fields {
+                                            if let Some(ref mut existing_fields) = config.event_fields {
+                                                // Merge new fields into existing
+                                                for (event_type, fields) in new_fields {
+                                                    existing_fields.insert(event_type, fields);
+                                                }
+                                            } else {
+                                                // First time seeing event_fields
+                                                config.event_fields = Some(new_fields);
+                                            }
+                                        }
+                                        tracing::debug!("Updated config event_fields: {:?}", config.event_fields);
                                     }
                                 });
                             }

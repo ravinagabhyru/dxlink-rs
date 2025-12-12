@@ -273,54 +273,77 @@ impl FeedData {
                     let field_names = match event_fields.get(event_type) {
                         Some(fields) => fields,
                         None => {
-                            return Err(DxLinkError {
-                                error_type: DxLinkErrorType::InvalidMessage,
-                                message: format!(
-                                    "No field configuration for event type: {}",
-                                    event_type
-                                ),
-                            })
+                            // Skip event types we don't have field configuration for
+                            // This can happen when the server sends events we didn't subscribe to
+                            tracing::warn!(
+                                "Skipping event type '{}' - no field configuration available",
+                                event_type
+                            );
+                            continue;
                         }
                     };
 
-                    if values.len() > field_names.len() {
-                        return Err(DxLinkError {
-                            error_type: DxLinkErrorType::InvalidMessage,
-                            message: format!(
-                                "Too many values for event type {}: expected {}, got {}",
-                                event_type,
-                                field_names.len(),
-                                values.len()
-                            ),
-                        });
+                    let num_fields = field_names.len();
+
+                    // Server can batch multiple events of the same type in a single array
+                    // e.g., 39 values with 13 fields = 3 events
+                    if values.len() % num_fields != 0 {
+                        tracing::warn!(
+                            "Values count {} is not a multiple of field count {} for event type {}",
+                            values.len(),
+                            num_fields,
+                            event_type
+                        );
+                        // Try to process as many complete events as possible
                     }
 
-                    // Construct JSON object with field names and values
-                    let mut obj = serde_json::Map::new();
+                    let num_events = values.len() / num_fields;
+                    if num_events == 0 && !values.is_empty() {
+                        // Not enough values for even one event, skip
+                        tracing::warn!(
+                            "Not enough values ({}) for event type {} (needs {})",
+                            values.len(),
+                            event_type,
+                            num_fields
+                        );
+                        continue;
+                    }
 
-                    // Always set eventType first
-                    obj.insert("eventType".to_string(), Value::String(event_type.clone()));
+                    // Process each batched event
+                    for event_idx in 0..num_events.max(1) {
+                        let start = event_idx * num_fields;
+                        let end = (start + num_fields).min(values.len());
+                        let event_values = &values[start..end];
 
-                    // Then process fields in order
-                    for (i, field_name) in field_names.iter().enumerate() {
-                        if i < values.len() {
-                            // Skip eventType as we've already set it
-                            if field_name != "eventType" {
-                                obj.insert(field_name.clone(), values[i].clone());
+                        // Construct JSON object with field names and values
+                        let mut obj = serde_json::Map::new();
+
+                        // Always set eventType first
+                        obj.insert("eventType".to_string(), Value::String(event_type.clone()));
+
+                        // Then process fields in order
+                        for (i, field_name) in field_names.iter().enumerate() {
+                            if i < event_values.len() {
+                                // Skip eventType as we've already set it
+                                if field_name != "eventType" {
+                                    obj.insert(field_name.clone(), event_values[i].clone());
+                                }
                             }
                         }
-                    }
 
-                    // Deserialize as FeedEvent
-                    let event_value = Value::Object(obj);
-                    tracing::debug!("Converting compact event to full: {:?}", event_value);
-                    match serde_json::from_value::<FeedEvent>(event_value) {
-                        Ok(event) => full_events.push(event),
-                        Err(err) => {
-                            return Err(DxLinkError {
-                                error_type: DxLinkErrorType::InvalidMessage,
-                                message: format!("Failed to deserialize event: {}", err),
-                            })
+                        // Deserialize as FeedEvent
+                        let event_value = Value::Object(obj);
+                        tracing::debug!("Converting compact event to full: {:?}", event_value);
+                        match serde_json::from_value::<FeedEvent>(event_value) {
+                            Ok(event) => full_events.push(event),
+                            Err(err) => {
+                                tracing::warn!(
+                                    "Failed to deserialize event {}: {}",
+                                    event_type,
+                                    err
+                                );
+                                // Continue processing other events instead of failing entirely
+                            }
                         }
                     }
                 }
@@ -674,6 +697,8 @@ mod tests {
 
     #[test]
     fn test_compact_to_full_missing_fields_config() {
+        // When field configuration is missing for an event type, the event should be skipped
+        // (not cause an error) and an empty result returned
         let event_fields = FeedEventFields::new(); // Empty fields config
         let compact_data = FeedData::Compact(vec![(
             "Quote".to_string(),
@@ -685,15 +710,15 @@ mod tests {
         )]);
 
         let result = compact_data.compact_to_full(&event_fields);
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert_eq!(e.error_type, DxLinkErrorType::InvalidMessage);
-            assert!(e.message.contains("No field configuration for event type"));
-        }
+        // Should succeed but return empty result since the event type was skipped
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
     }
 
     #[test]
-    fn test_compact_to_full_too_many_values() {
+    fn test_compact_to_full_batched_events() {
+        // Server can batch multiple events of the same type in a single array
+        // e.g., 6 values with 3 fields = 2 events
         let mut event_fields = FeedEventFields::new();
         event_fields.insert(
             "Quote".to_string(),
@@ -707,23 +732,40 @@ mod tests {
         let compact_data = FeedData::Compact(vec![(
             "Quote".to_string(),
             vec![
+                // First event
                 Value::String("AAPL".to_string()),
                 Value::String("Quote".to_string()),
                 Value::Number(Number::from_f64(123.45).unwrap()),
-                Value::Number(Number::from_f64(123.46).unwrap()), // Extra value
+                // Second event
+                Value::String("MSFT".to_string()),
+                Value::String("Quote".to_string()),
+                Value::Number(Number::from_f64(456.78).unwrap()),
             ],
         )]);
 
         let result = compact_data.compact_to_full(&event_fields);
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert_eq!(e.error_type, DxLinkErrorType::InvalidMessage);
-            assert!(e.message.contains("Too many values"));
+        assert!(result.is_ok());
+        let events = result.unwrap();
+        assert_eq!(events.len(), 2);
+
+        if let FeedEvent::Quote(quote) = &events[0] {
+            assert_eq!(quote.event_symbol, "AAPL");
+            assert!(matches!(quote.bid_price, Some(JSONDouble::Number(n)) if n == 123.45));
+        } else {
+            panic!("Expected Quote event");
+        }
+
+        if let FeedEvent::Quote(quote) = &events[1] {
+            assert_eq!(quote.event_symbol, "MSFT");
+            assert!(matches!(quote.bid_price, Some(JSONDouble::Number(n)) if n == 456.78));
+        } else {
+            panic!("Expected Quote event");
         }
     }
 
     #[test]
-    fn test_compact_to_full_fewer_values() {
+    fn test_compact_to_full_fewer_values_skipped() {
+        // When there are fewer values than fields, no complete events can be formed
         let mut event_fields = FeedEventFields::new();
         event_fields.insert(
             "Quote".to_string(),
@@ -741,20 +783,13 @@ mod tests {
                 Value::String("AAPL".to_string()),
                 Value::String("Quote".to_string()),
                 Value::Number(Number::from_f64(123.45).unwrap()),
-                // Missing askPrice value
+                // Missing askPrice value - only 3 values for 4 fields = 0 complete events
             ],
         )]);
 
         let full_events = compact_data.compact_to_full(&event_fields).unwrap();
-        assert_eq!(full_events.len(), 1);
-
-        if let FeedEvent::Quote(quote) = &full_events[0] {
-            assert_eq!(quote.event_symbol, "AAPL");
-            assert!(matches!(quote.bid_price, Some(JSONDouble::Number(n)) if n == 123.45));
-            assert!(quote.ask_price.is_none()); // Should be None since value was missing
-        } else {
-            panic!("Expected Quote event");
-        }
+        // No complete events can be formed with fewer values than fields
+        assert_eq!(full_events.len(), 0);
     }
 
     #[test]

@@ -845,18 +845,14 @@ impl DxLinkWebSocketClient {
         &mut self,
         service: String,
         parameters: serde_json::Value,
-    ) -> Arc<DxLinkWebSocketChannel> {
+    ) -> Result<Arc<DxLinkWebSocketChannel>, DxLinkError> {
         debug!(
             "Opening channel in DxLinkClient implementation with service: {}",
             service
         );
-        match self.open_channel_internal(service, parameters).await {
-            Ok(channel) => channel,
-            Err(e) => {
-                error!("Failed to open channel: {}", e);
-                panic!("Failed to open channel: {}", e); // TODO: Better error handling
-            }
-        }
+        self.open_channel_internal(service, parameters)
+            .await
+            .map_err(|e| DxLinkError::new(DxLinkErrorType::Unknown, e.to_string()))
     }
 
     async fn start_keepalive_timer(&self) {
