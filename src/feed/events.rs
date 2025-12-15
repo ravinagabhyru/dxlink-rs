@@ -3,30 +3,158 @@
 //! This module contains the event type definitions for the feed service,
 //! including all event subtypes like QuoteEvent, TradeEvent, etc.
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
 /// Custom type to handle JSON double values including special values like NaN, Infinity, etc.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(untagged)]
+///
+/// This type properly handles:
+/// - Regular numbers (JSON numbers)
+/// - Special string values: "NaN", "Infinity", "-Infinity"
+///
+/// Uses custom serialize/deserialize to handle all cases robustly.
+#[derive(Debug, Clone, PartialEq)]
 pub enum JSONDouble {
     /// Regular numeric value
     Number(f64),
     /// Not a number - "NaN"
-    #[serde(deserialize_with = "deserialize_nan", serialize_with = "serialize_nan")]
     NaN,
     /// Positive infinity - "Infinity"
-    #[serde(
-        deserialize_with = "deserialize_infinity",
-        serialize_with = "serialize_infinity"
-    )]
     Infinity,
     /// Negative infinity - "-Infinity"
-    #[serde(
-        deserialize_with = "deserialize_neg_infinity",
-        serialize_with = "serialize_neg_infinity"
-    )]
     NegInfinity,
+}
+
+// Custom serialization
+impl Serialize for JSONDouble {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            JSONDouble::Number(n) => serializer.serialize_f64(*n),
+            JSONDouble::NaN => serializer.serialize_str("NaN"),
+            JSONDouble::Infinity => serializer.serialize_str("Infinity"),
+            JSONDouble::NegInfinity => serializer.serialize_str("-Infinity"),
+        }
+    }
+}
+
+// Custom deserialization - handles all cases robustly
+struct JSONDoubleVisitor;
+
+impl<'de> Visitor<'de> for JSONDoubleVisitor {
+    type Value = JSONDouble;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a number or special string (\"NaN\", \"Infinity\", \"-Infinity\")")
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(JSONDouble::from(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(JSONDouble::Number(value as f64))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(JSONDouble::Number(value as f64))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        match value {
+            "NaN" => Ok(JSONDouble::NaN),
+            "Infinity" => Ok(JSONDouble::Infinity),
+            "-Infinity" => Ok(JSONDouble::NegInfinity),
+            // Try to parse numeric strings
+            _ => {
+                if let Ok(n) = value.parse::<f64>() {
+                    Ok(JSONDouble::from(n))
+                } else {
+                    Err(de::Error::custom(format!(
+                        "unexpected string value for JSONDouble: '{}' (expected number, \"NaN\", \"Infinity\", or \"-Infinity\")",
+                        value
+                    )))
+                }
+            }
+        }
+    }
+
+    // Handle map/object type - this shouldn't happen for JSONDouble but provides better error context
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: de::MapAccess<'de>,
+    {
+        // Try to extract useful info from the map for error reporting
+        let mut keys = Vec::new();
+        while let Some(key) = map.next_key::<String>()? {
+            keys.push(key);
+            // Skip the value
+            let _ = map.next_value::<serde::de::IgnoredAny>()?;
+        }
+        Err(de::Error::custom(format!(
+            "unexpected object/map for JSONDouble field (keys: {:?}). Expected a number or special string.",
+            keys
+        )))
+    }
+
+    // Handle sequence/array type
+    fn visit_seq<A>(self, _seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: de::SeqAccess<'de>,
+    {
+        Err(de::Error::custom(
+            "unexpected array for JSONDouble field. Expected a number or special string.",
+        ))
+    }
+
+    // Handle boolean type
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        // Convert boolean to number (0 or 1) as a fallback
+        Ok(JSONDouble::Number(if value { 1.0 } else { 0.0 }))
+    }
+
+    // Handle null/unit type - return NaN as a reasonable default for missing values
+    fn visit_unit<E>(self) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        // Null values in JSONDouble context are typically treated as NaN
+        Ok(JSONDouble::NaN)
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(JSONDouble::NaN)
+    }
+}
+
+impl<'de> Deserialize<'de> for JSONDouble {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(JSONDoubleVisitor)
+    }
 }
 
 impl JSONDouble {
@@ -89,64 +217,6 @@ impl fmt::Display for JSONDouble {
     }
 }
 
-// Custom deserialization functions (as before)
-fn deserialize_nan<'de, D>(deserializer: D) -> Result<(), D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s: String = Deserialize::deserialize(deserializer)?;
-    if s == "NaN" {
-        Ok(())
-    } else {
-        Err(serde::de::Error::custom("Expected \"NaN\""))
-    }
-}
-
-fn deserialize_infinity<'de, D>(deserializer: D) -> Result<(), D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s: String = Deserialize::deserialize(deserializer)?;
-    if s == "Infinity" {
-        Ok(())
-    } else {
-        Err(serde::de::Error::custom("Expected \"Infinity\""))
-    }
-}
-
-fn deserialize_neg_infinity<'de, D>(deserializer: D) -> Result<(), D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s: String = Deserialize::deserialize(deserializer)?;
-    if s == "-Infinity" {
-        Ok(())
-    } else {
-        Err(serde::de::Error::custom("Expected \"-Infinity\""))
-    }
-}
-
-// Custom serialization functions
-fn serialize_nan<S>(serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str("NaN")
-}
-
-fn serialize_infinity<S>(serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str("Infinity")
-}
-
-fn serialize_neg_infinity<S>(serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str("-Infinity")
-}
 
 /// Union type for all feed event types
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
