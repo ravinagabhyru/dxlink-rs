@@ -94,22 +94,49 @@ impl<'de> Visitor<'de> for JSONDoubleVisitor {
         }
     }
 
-    // Handle map/object type - this shouldn't happen for JSONDouble but provides better error context
+    // Handle map/object type - this can happen when serde_json::from_value is used on a cloned Value
+    // containing Number types. serde_json internally represents Numbers with a special tagged format.
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
     where
         A: de::MapAccess<'de>,
     {
-        // Try to extract useful info from the map for error reporting
-        let mut keys = Vec::new();
-        while let Some(key) = map.next_key::<String>()? {
-            keys.push(key);
-            // Skip the value
-            let _ = map.next_value::<serde::de::IgnoredAny>()?;
+        // Check for serde_json's internal Number representation
+        // When using from_value on a cloned Value, Numbers can be serialized as:
+        // {"$serde_json::private::Number": "123.45"}
+        if let Some(key) = map.next_key::<String>()? {
+            if key == "$serde_json::private::Number" {
+                // Extract the number string and parse it
+                let value_str: String = map.next_value()?;
+                if let Ok(n) = value_str.parse::<f64>() {
+                    return Ok(JSONDouble::from(n));
+                } else {
+                    // Handle special string values
+                    return match value_str.as_str() {
+                        "NaN" => Ok(JSONDouble::NaN),
+                        "Infinity" => Ok(JSONDouble::Infinity),
+                        "-Infinity" => Ok(JSONDouble::NegInfinity),
+                        _ => Err(de::Error::custom(format!(
+                            "could not parse serde_json Number value: '{}'",
+                            value_str
+                        ))),
+                    };
+                }
+            }
+
+            // Not a serde_json Number - collect remaining keys for error message
+            let mut keys = vec![key];
+            while let Some(k) = map.next_key::<String>()? {
+                keys.push(k);
+                let _ = map.next_value::<serde::de::IgnoredAny>()?;
+            }
+            Err(de::Error::custom(format!(
+                "unexpected object/map for JSONDouble field (keys: {:?}). Expected a number or special string.",
+                keys
+            )))
+        } else {
+            // Empty map - treat as NaN
+            Ok(JSONDouble::NaN)
         }
-        Err(de::Error::custom(format!(
-            "unexpected object/map for JSONDouble field (keys: {:?}). Expected a number or special string.",
-            keys
-        )))
     }
 
     // Handle sequence/array type
