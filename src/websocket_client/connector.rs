@@ -114,17 +114,17 @@ impl WebSocketConnector {
 
         let payload = message.payload();
         let json = serde_json::to_string(&payload)?;
-        tracing::info!(
+        tracing::debug!(
             "Sending WebSocket message type: {}, channel: {}",
             message.message_type(),
             message.channel()
         );
-        tracing::info!("Raw message payload: {}", json);
+        tracing::debug!("Raw message payload: {}", json);
 
         if let Some(write) = self.write_stream.lock().await.as_mut() {
             tracing::debug!("Writing message to WebSocket stream");
             write.send(WsMessage::Text(json)).await?;
-            tracing::info!("Successfully sent message over WebSocket");
+            tracing::debug!("Successfully sent message over WebSocket");
         } else {
             tracing::warn!("No write stream available");
         }
