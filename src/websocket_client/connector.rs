@@ -123,7 +123,7 @@ impl WebSocketConnector {
 
         if let Some(write) = self.write_stream.lock().await.as_mut() {
             tracing::debug!("Writing message to WebSocket stream");
-            write.send(WsMessage::Text(json)).await?;
+            write.send(WsMessage::Text(json.into())).await?;
             tracing::debug!("Successfully sent message over WebSocket");
         } else {
             tracing::warn!("No write stream available");
@@ -169,7 +169,7 @@ impl WebSocketConnector {
     ) -> Result<Box<dyn Message + Send + Sync>, serde_json::Error> {
         match msg {
             WsMessage::Text(text) => {
-                let value: Value = serde_json::from_str(&text)?;
+                let value: Value = serde_json::from_str(text.as_str())?;
                 let msg_type = value["type"].as_str().unwrap_or("");
 
                 let message_result: Result<Box<dyn Message + Send + Sync>, serde_json::Error> =
@@ -256,20 +256,21 @@ impl WebSocketConnector {
         message_listener: Arc<Mutex<Option<MessageListener>>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let WsMessage::Text(text) = msg {
-            debug!("Received WebSocket message: {}", text);
+            let text_str = text.as_str();
+            debug!("Received WebSocket message: {}", text_str);
 
             // 1. Parse the incoming text into a generic serde_json::Value
-            let value: Value = match serde_json::from_str(&text) {
+            let value: Value = match serde_json::from_str(text_str) {
                 Ok(v) => v,
                 Err(e) => {
-                    error!("Failed to parse JSON message: {}: {}", e, text);
+                    error!("Failed to parse JSON message: {}: {}", e, text_str);
                     return Err(format!("Failed to parse JSON message: {}", e).into());
                 }
             };
 
             // Validate message structure
             if !value.is_object() {
-                error!("Message is not an object: {}", text);
+                error!("Message is not an object: {}", text_str);
                 return Err("Message is not an object".into());
             }
 
@@ -277,7 +278,7 @@ impl WebSocketConnector {
             let msg_type = match value.get("type").and_then(|t| t.as_str()) {
                 Some(t) => t,
                 None => {
-                    error!("Missing or invalid message type in: {}", text);
+                    error!("Missing or invalid message type in: {}", text_str);
                     return Err("Missing or invalid message type".into());
                 }
             };
@@ -285,7 +286,7 @@ impl WebSocketConnector {
             let channel = match value.get("channel").and_then(|c| c.as_u64()) {
                 Some(c) => c,
                 None => {
-                    error!("Missing or invalid channel in: {}", text);
+                    error!("Missing or invalid channel in: {}", text_str);
                     return Err("Missing or invalid channel".into());
                 }
             };
@@ -369,7 +370,7 @@ impl WebSocketConnector {
                 Err(e) => {
                     error!(
                         "Failed to deserialize {} message: {}: {}",
-                        msg_type, e, text
+                        msg_type, e, text_str
                     );
                     return Err(format!("Failed to deserialize {} message: {}", msg_type, e).into());
                 }
@@ -383,7 +384,7 @@ impl WebSocketConnector {
                 );
                 listener(message);
             } else {
-                warn!("No message listener set for message: {}", text);
+                warn!("No message listener set for message: {}", text_str);
             }
         } else {
             debug!("Received non-text WebSocket message: {:?}", msg);
@@ -493,7 +494,7 @@ mod tests {
 
         // Create a valid SETUP message
         let setup_json = r#"{"type":"SETUP","channel":0,"version":"1.0","keepaliveTimeout":30000}"#;
-        let ws_message = WsMessage::Text(setup_json.to_string());
+        let ws_message = WsMessage::Text(setup_json.to_string().into());
 
         // Process the message
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
@@ -544,7 +545,7 @@ mod tests {
         // Create a valid FEED_CONFIG message
         let feed_config_json =
             r#"{"type":"FEED_CONFIG","channel":1,"aggregationPeriod":1000,"dataFormat":"FULL"}"#;
-        let ws_message = WsMessage::Text(feed_config_json.to_string());
+        let ws_message = WsMessage::Text(feed_config_json.to_string().into());
 
         // Process the message
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
@@ -594,7 +595,7 @@ mod tests {
 
         // Create a valid DOM_SNAPSHOT message
         let dom_snapshot_json = r#"{"type":"DOM_SNAPSHOT","channel":2,"time":1617293142123,"bids":[{"price":100.5,"size":10.0},{"price":100.0,"size":20.0}],"asks":[{"price":101.0,"size":15.0},{"price":101.5,"size":25.0}]}"#;
-        let ws_message = WsMessage::Text(dom_snapshot_json.to_string());
+        let ws_message = WsMessage::Text(dom_snapshot_json.to_string().into());
 
         // Process the message
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
@@ -645,7 +646,7 @@ mod tests {
         let message_listener = Arc::new(Mutex::new(Some(message_listener)));
 
         let dom_config_json = r#"{"type":"DOM_CONFIG","channel":3,"aggregationPeriod":250,"depthLimit":4,"dataFormat":"FULL","orderFields":["price","size"]}"#;
-        let ws_message = WsMessage::Text(dom_config_json.to_string());
+        let ws_message = WsMessage::Text(dom_config_json.to_string().into());
 
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
         assert!(result.is_ok());
@@ -676,7 +677,7 @@ mod tests {
         let message_listener = Arc::new(Mutex::new(Some(message_listener)));
 
         let invalid_dom = r#"{"type":"DOM_SNAPSHOT","channel":1,"time":1,"bids":[{"price":"bad","size":1}],"asks":[]}"#;
-        let ws_message = WsMessage::Text(invalid_dom.to_string());
+        let ws_message = WsMessage::Text(invalid_dom.to_string().into());
 
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
         assert!(result.is_err());
@@ -693,7 +694,7 @@ mod tests {
 
         // Create an invalid JSON message
         let invalid_json = r#"{"type":"SETUP","channel":0,invalid_json"#;
-        let ws_message = WsMessage::Text(invalid_json.to_string());
+        let ws_message = WsMessage::Text(invalid_json.to_string().into());
 
         // Process the message
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
@@ -718,7 +719,7 @@ mod tests {
 
         // Missing type
         let missing_type = r#"{"channel":0,"version":"1.0"}"#;
-        let ws_message = WsMessage::Text(missing_type.to_string());
+        let ws_message = WsMessage::Text(missing_type.to_string().into());
         let result = WebSocketConnector::handle_message(ws_message, message_listener.clone()).await;
         assert!(
             result.is_err(),
@@ -727,7 +728,7 @@ mod tests {
 
         // Missing channel
         let missing_channel = r#"{"type":"SETUP","version":"1.0"}"#;
-        let ws_message = WsMessage::Text(missing_channel.to_string());
+        let ws_message = WsMessage::Text(missing_channel.to_string().into());
         let result = WebSocketConnector::handle_message(ws_message, message_listener.clone()).await;
         assert!(
             result.is_err(),
@@ -746,7 +747,7 @@ mod tests {
 
         // Create a message with an unknown type
         let unknown_type = r#"{"type":"UNKNOWN_TYPE","channel":0}"#;
-        let ws_message = WsMessage::Text(unknown_type.to_string());
+        let ws_message = WsMessage::Text(unknown_type.to_string().into());
 
         // Process the message
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
@@ -776,7 +777,7 @@ mod tests {
 
         // Create a message with invalid field values (wrong types)
         let invalid_field = r#"{"type":"SETUP","channel":"not-a-number","version":"1.0"}"#;
-        let ws_message = WsMessage::Text(invalid_field.to_string());
+        let ws_message = WsMessage::Text(invalid_field.to_string().into());
 
         // Process the message
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
@@ -807,7 +808,7 @@ mod tests {
 
         // Create a valid AUTH_STATE message
         let auth_state_json = r#"{"type":"AUTH_STATE","channel":0,"state":"AUTHORIZED"}"#;
-        let ws_message = WsMessage::Text(auth_state_json.to_string());
+        let ws_message = WsMessage::Text(auth_state_json.to_string().into());
 
         // Process the message
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
@@ -856,7 +857,7 @@ mod tests {
 
         // Create a valid KEEPALIVE message
         let keepalive_json = r#"{"type":"KEEPALIVE","channel":0}"#;
-        let ws_message = WsMessage::Text(keepalive_json.to_string());
+        let ws_message = WsMessage::Text(keepalive_json.to_string().into());
 
         // Process the message
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
@@ -905,7 +906,7 @@ mod tests {
         // Create a valid ERROR message with the correct enum value (lowercase due to #[serde(rename_all = "snake_case")])
         let error_json =
             r#"{"type":"ERROR","channel":0,"error":"timeout","message":"Connection timed out"}"#;
-        let ws_message = WsMessage::Text(error_json.to_string());
+        let ws_message = WsMessage::Text(error_json.to_string().into());
 
         // Process the message
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
@@ -969,7 +970,7 @@ mod tests {
                 }
             ]
         }"#;
-        let ws_message = WsMessage::Text(feed_data_json.to_string());
+        let ws_message = WsMessage::Text(feed_data_json.to_string().into());
 
         // Process the message
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
@@ -1039,7 +1040,7 @@ mod tests {
                 ["AAPL", "Quote", 123.45, 123.46, 100, 200]
             ]
         }"#;
-        let ws_message = WsMessage::Text(feed_data_json.to_string());
+        let ws_message = WsMessage::Text(feed_data_json.to_string().into());
 
         // Process the message
         let result = WebSocketConnector::handle_message(ws_message, message_listener).await;
